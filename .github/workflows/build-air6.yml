@@ -68,10 +68,11 @@ jobs:
 
       - name: Build firmware
         run: |
+          set -o pipefail
           if [ "${{ inputs.debug_log }}" = "true" ]; then
-            make -j1 V=s
+            make -j1 V=s 2>&1 | tee build.log
           else
-            make -j"$(nproc)" || make -j1 V=s
+            make -j"$(nproc)" 2>&1 | tee build.log || make -j1 V=s 2>&1 | tee -a build.log
           fi
 
       - name: Summarize build outputs
@@ -83,6 +84,21 @@ jobs:
           else
             echo "No output directory bin/targets/mediatek/mt6990 found." >> "$GITHUB_STEP_SUMMARY"
           fi
+          if [ -f build.log ] && [ "${{ job.status }}" = "failure" ]; then
+            echo "### Build Error Tail" >> "$GITHUB_STEP_SUMMARY"
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            tail -n 100 build.log >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload build log on failure
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: openwrt-air6-build-log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
