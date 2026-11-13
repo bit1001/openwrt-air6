@@ -84,6 +84,18 @@ jobs:
           else
             echo "No output directory bin/targets/mediatek/mt6990 found." >> "$GITHUB_STEP_SUMMARY"
           fi
+          if [ -d build-logs ]; then
+            echo "### Sub-build Logs" >> "$GITHUB_STEP_SUMMARY"
+            for logfile in build-logs/*.log; do
+              if [ -f "$logfile" ]; then
+                echo "#### $logfile" >> "$GITHUB_STEP_SUMMARY"
+                echo '```text' >> "$GITHUB_STEP_SUMMARY"
+                grep -i -C 2 "error:" "$logfile" | head -n 40 >> "$GITHUB_STEP_SUMMARY" || true
+                tail -n 30 "$logfile" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+              fi
+            done
+          fi
           if [ -f build.log ] && [ "${{ job.status }}" = "failure" ]; then
             echo "### Build Error Tail" >> "$GITHUB_STEP_SUMMARY"
             echo '```text' >> "$GITHUB_STEP_SUMMARY"
@@ -95,8 +107,10 @@ jobs:
         uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: openwrt-air6-build-log
-          path: build.log
+          name: openwrt-air6-build-logs
+          path: |
+            build.log
+            build-logs/
           if-no-files-found: ignore
           retention-days: 7
 

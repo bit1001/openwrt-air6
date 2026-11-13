@@ -17,7 +17,7 @@ if part in ('cmn','wifi'):
  flags+=['-DMT_WIFI_COMMON_SUPPORT']
  if part=='cmn':flags+=['-DRT_CFG80211_SUPPORT','-I'+str(paths['cmn'])]
  else:
-  flags+=['-I'+str(base/'package/mtk/mt7990-wifi/src/wifi'),'-I'+str(base/'vendor-source/wifi/include'),'-I'+str(base/'vendor-include/mtk_nl80211_inc'),'-include',str(base/'vendor-include/vendor618_wext.h')]
+  flags+=['-I'+str(base/'package/mtk/mt7990-wifi/src/wifi'),'-I'+str(base/'package/mtk/mt7990-wifi/src/wifi/mt_wifi/include'),'-I'+str(base/'vendor-include/mtk_nl80211_inc'),'-include',str(base/'vendor-include/vendor618_wext.h')]
   cfg=json.loads((base/'vendor-config.json').read_text())
   args+=['CONFIG_'+key+'='+value for key,value in cfg.items()]
   args+=['CFG_CFG80211_VERSION=6.18.0','LINUX_DIR='+str(k.parent)]
@@ -42,5 +42,15 @@ log=base/'build-logs'/(part+'-build.log');log.parent.mkdir(exist_ok=True)
 (log.parent/(part+'-command.json')).write_text(json.dumps(args,indent=2)+'\n')
 with log.open('w') as f:r=subprocess.run(args,stdout=f,stderr=subprocess.STDOUT,env=env)
 print(part,'exit',r.returncode,'log',log)
-print('\n'.join(log.read_text(errors='replace').splitlines()[-45:]))
+if r.returncode != 0:
+    lines = log.read_text(errors='replace').splitlines()
+    err_lines = [l for l in lines if 'error:' in l.lower()]
+    if err_lines:
+        print(f"=== {part} FAILED: {len(err_lines)} error lines found ===")
+        for el in err_lines[:50]:
+            print("  " + el)
+    print(f"=== {part} LAST 100 LINES OF LOG ===")
+    print('\n'.join(lines[-100:]))
+else:
+    print('\n'.join(log.read_text(errors='replace').splitlines()[-45:]))
 sys.exit(r.returncode)
