@@ -17,7 +17,7 @@ if part in ('cmn','wifi'):
  flags+=['-DMT_WIFI_COMMON_SUPPORT']
  if part=='cmn':flags+=['-DRT_CFG80211_SUPPORT','-I'+str(paths['cmn'])]
  else:
-  flags+=['-I'+str(base/'package/mtk/mt7990-wifi/src/wifi'),'-I'+str(base/'vendor-source/wifi/include'),'-I'+str(base/'vendor-include/mtk_nl80211_inc'),'-include',str(base/'vendor-include/vendor618_wext.h')]
+  flags+=['-I'+str(base/'package/mtk/mt7990-wifi/src/wifi'),'-I'+str(base/'package/mtk/mt7990-wifi/src/wifi/mt_wifi/include'),'-I'+str(base/'vendor-include/mtk_nl80211_inc'),'-include',str(base/'vendor-include/vendor618_wext.h')]
   cfg=json.loads((base/'vendor-config.json').read_text())
   args+=['CONFIG_'+key+'='+value for key,value in cfg.items()]
   args+=['CFG_CFG80211_VERSION=6.18.0','LINUX_DIR='+str(k.parent)]
