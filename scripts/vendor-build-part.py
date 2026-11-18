@@ -37,7 +37,7 @@ elif part=='coex':
  flags=['-I'+str(k/'drivers/misc/mediatek/include'),'-DCOEX_DIRECT_PATH','-DCONFIG_WIFI_MD_COEX_SUPPORT=1']
  extra=[]
 args+=['KCFLAGS=-Wno-error -include '+str(base/'vendor-include/vendor618_compat.h'),'NOSTDINC_FLAGS='+' '.join(flags),'KBUILD_EXTRA_SYMBOLS='+' '.join(extra),'modules']
-env=dict(os.environ,PATH=str(ow/'staging_dir/host/bin')+':'+str(tc.parent)+':/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',FORCE_UNSAFE_CONFIGURE='1',STAGING_DIR=str(st))
+env=dict(os.environ,PATH=str(ow/'staging_dir/host/bin')+':'+os.path.dirname(tc)+':/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',FORCE_UNSAFE_CONFIGURE='1',STAGING_DIR=str(st))
 log=base/'build-logs'/(part+'-build.log');log.parent.mkdir(exist_ok=True)
 (log.parent/(part+'-command.json')).write_text(json.dumps(args,indent=2)+'\n')
 with log.open('w') as f:r=subprocess.run(args,stdout=f,stderr=subprocess.STDOUT,env=env)
