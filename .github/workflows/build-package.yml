@@ -1,0 +1,123 @@
+name: Build package with AIR6 SDK
+
+# Compiles a single OpenWrt package (.apk) against the SDK that was produced by
+# build-air6.yml from the SAME source tree as the firmware — so the toolchain,
+# kernel headers, Module.symvers and vermagic match the flashed firmware and the
+# resulting .apk installs with `apk add --allow-untrusted <file>.apk`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Package make target, e.g. dae / v2ray / luci-app-xxx / kmod-wireguard"
+        required: true
+        type: string
+      sdk_run_id:
+        description: "Run ID of build-air6.yml to take the SDK from (blank = latest successful)"
+        required: false
+        type: string
+      clean:
+        description: "Run make clean for the package first"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: build-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compile:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd build-essential flex bison gawk \
+            gettext libncurses-dev libssl-dev python3 rsync unzip file wget \
+            curl libelf-dev
+
+      - name: Resolve SDK run ID
+        id: runid
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RID="${{ inputs.sdk_run_id }}"
+          if [ -z "$RID" ]; then
+            RID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build-air6.yml \
+              --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          fi
+          echo "Using SDK from run $RID"
+          echo "rid=$RID" >> "$GITHUB_OUTPUT"
+
+      - name: Download SDK artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p sdk
+          gh run download "${{ steps.runid.outputs.rid }}" \
+            --repo "$GITHUB_REPOSITORY" -n openwrt-air6-sdk --dir sdk
+          ls -lh sdk/
+
+      - name: Unpack SDK
+        run: |
+          SDK=$(find sdk -name 'openwrt-sdk-*.tar.zst' | head -n1)
+          [ -z "$SDK" ] && { echo "SDK tarball missing"; exit 1; }
+          mkdir -p sdkroot
+          tar --zstd -xf "$SDK" -C sdkroot --strip-components=1
+          echo "SDK unpacked:"; ls sdkroot | head
+
+      - name: Configure pinned feeds
+        working-directory: sdkroot
+        run: |
+          cat > feeds.conf << 'EOF'
+          src-git packages https://github.com/openwrt/packages.git^aea49e65a439f73fbc0e4b8c60ced1f1839f64fd
+          src-git luci https://github.com/openwrt/luci.git^e969939b49167516e219d465df8030d98d443d67
+          src-git routing https://github.com/openwrt/routing.git^48c808034414a2112cf9d5261a20a320e8d0d170
+          src-git telephony https://github.com/openwrt/telephony.git^c58ec5a6703966dcccb53d0919698c8aba3a9ef5
+          EOF
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          make defconfig
+
+      - name: Build package
+        working-directory: sdkroot
+        run: |
+          set -o pipefail
+          PKG="${{ inputs.package }}"
+          if [ "${{ inputs.clean }}" = "true" ]; then
+            make package/$PKG/clean || true
+          fi
+          make package/$PKG/compile -j"$(nproc)" 2>&1 | tee build-package.log \
+            || make package/$PKG/compile -j1 V=s 2>&1 | tee -a build-package.log
+
+      - name: Collect .apk
+        if: always()
+        run: |
+          echo "### Build result" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f sdkroot/build-package.log ]; then
+            grep -iE 'error:' sdkroot/build-package.log | head -n 30 >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+          find sdkroot/bin -name '*.apk' -type f 2>/dev/null | head -50
+
+      - name: Upload log on failure
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-package-log
+          path: sdkroot/build-package.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: air6-package-${{ inputs.package }}
+          path: sdkroot/bin/packages/
+          if-no-files-found: error
+          retention-days: 14

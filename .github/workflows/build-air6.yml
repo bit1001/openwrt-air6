@@ -60,6 +60,11 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           make defconfig
+          # Build the SDK from this exact tree so its toolchain, kernel headers,
+          # Module.symvers and vermagic match the firmware byte-for-byte.
+          echo CONFIG_SDK=y >> .config
+          make defconfig
+          grep -E '^CONFIG_SDK=y' .config
 
       - name: Download package sources
         run: |
@@ -121,3 +126,25 @@ jobs:
           name: openwrt-air6-mt6990-images
           path: bin/targets/mediatek/mt6990/
           retention-days: 14
+
+      - name: Verify and upload SDK
+        if: success()
+        run: |
+          set -e
+          SDK=$(find bin/targets/mediatek/mt6990/ -maxdepth 1 -name 'openwrt-sdk-*.tar.zst' | head -n1)
+          if [ -z "$SDK" ]; then echo "ERROR: SDK tarball not found"; exit 1; fi
+          echo "SDK_FILE=$SDK" >> "$GITHUB_ENV"
+          echo "### SDK (same-tree, firmware-matching)" >> "$GITHUB_STEP_SUMMARY"
+          ls -lh "$SDK" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "$SDK" >> sdk-path.txt
+
+      - name: Upload SDK artifact
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: openwrt-air6-sdk
+          path: |
+            bin/targets/mediatek/mt6990/openwrt-sdk-*.tar.zst
+            sdk-path.txt
+          if-no-files-found: error
+          retention-days: 30
