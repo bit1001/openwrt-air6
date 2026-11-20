@@ -112,11 +112,15 @@ jobs:
           if [ "${{ inputs.clean }}" = "true" ]; then
             make package/$PKG/clean || true
           fi
-          # Build ALL selected packages in dependency order: the SDK has no
-          # prebuilt target staging libs, so a dep like libcap must be staged
-          # before a package whose configure needs it (e.g. coreutils).
-          make -j"$(nproc)" package/compile 2>&1 | tee build-package.log \
-            || make -j1 V=s package/compile 2>&1 | tee -a build-package.log
+          # Build ONLY the target package. Standard SDK usage: dependencies
+          # declared as BUILD_DEPENDS are auto-built by OpenWrt. Most packages
+          # (esp. pure Lua/config packages) build in seconds this way. Avoid
+          # `make package/compile` — that builds every =y package in the SDK's
+          # default config (takes 30+ min). Rare packages whose configure needs
+          # a lib declared only as runtime DEPENDS (e.g. coreutils/libcap) must
+          # be handled case-by-case; document this limitation.
+          make -j"$(nproc)" package/$PKG/compile 2>&1 | tee build-package.log \
+            || make -j1 V=s package/$PKG/compile 2>&1 | tee -a build-package.log
 
       - name: Collect .apk
         if: always()
