@@ -100,10 +100,10 @@ jobs:
           # toolchain lacks sources like libquadmath.so). Selecting just the
           # target symbol builds only that package (+ deps autoselected).
           SYM="CONFIG_PACKAGE_$(echo "$PKG" | tr '/' '_')"
-          # Strip all pre-selected packages from the SDK's default .config so
-          # `make package/compile` builds ONLY this package + the dependencies
-          # its Kconfig selects — not the SDK's whole default package set.
-          sed -i -E 's/^(CONFIG_PACKAGE_[A-Za-z0-9_]+)=[ym]$/# \1 is not set/' .config
+          # SDK's own .config is already minimal (toolchain only). Just enable
+          # the target symbol; defconfig pulls in its Kconfig dependencies.
+          # Do NOT blanket-comment all CONFIG_PACKAGE_* — that drops the target
+          # too when its deps are unsatisfied after defconfig.
           echo "$SYM=y" >> .config
           make defconfig
           grep -E "^${SYM}=y" .config || { echo "ERROR: $SYM not enabled after defconfig (bad package name?)"; exit 1; }
