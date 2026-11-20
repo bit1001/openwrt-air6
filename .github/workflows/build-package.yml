@@ -94,14 +94,20 @@ jobs:
         run: |
           set -o pipefail
           PKG="${{ inputs.package }}"
-          # DEVELOPER=1 forces the BuildTarget rules to be generated even when
-          # CONFIG_PACKAGE_<name> is not selected in .config — required for
-          # ad-hoc SDK package builds. Without it make silently builds a no-op.
+          # Select the package via its Kconfig symbol rather than DEVELOPER=1.
+          # DEVELOPER=1 generates BuildTargets for EVERY package including the
+          # toolchain pseudo-package, which then fails in an SDK (prebuilt
+          # toolchain lacks sources like libquadmath.so). Selecting just the
+          # target symbol builds only that package (+ deps autoselected).
+          SYM="CONFIG_PACKAGE_$(echo "$PKG" | tr '/' '_')"
+          echo "$SYM=y" >> .config
+          make defconfig
+          grep -E "^${SYM}=y" .config || { echo "ERROR: $SYM not enabled after defconfig (bad package name?)"; exit 1; }
           if [ "${{ inputs.clean }}" = "true" ]; then
-            make DEVELOPER=1 package/$PKG/clean || true
+            make package/$PKG/clean || true
           fi
-          make DEVELOPER=1 package/$PKG/compile -j"$(nproc)" 2>&1 | tee build-package.log \
-            || make DEVELOPER=1 package/$PKG/compile -j1 V=s 2>&1 | tee -a build-package.log
+          make -j"$(nproc)" package/$PKG/compile 2>&1 | tee build-package.log \
+            || make -j1 V=s package/$PKG/compile 2>&1 | tee -a build-package.log
 
       - name: Collect .apk
         if: always()
