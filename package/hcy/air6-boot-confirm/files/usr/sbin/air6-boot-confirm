@@ -1,0 +1,50 @@
+#!/bin/sh
+# Confirm the running slot once userspace is healthy and pin it as the boot target.
+# This is the firmware-side anti-rollback guard: every successful boot re-asserts
+# the running slot's priority so a quick reboot (e.g. while tuning Wi-Fi) cannot
+# drain the bootloader retry counter and fall back to the other slot.
+set -eu
+
+log() { logger -t air6-boot-confirm "$*"; }
+
+[ -b /dev/mmcblk0p1 ] || exit 0
+grep -qx 'PARTNAME=misc' /sys/class/block/mmcblk0p1/uevent
+[ "$(cat /sys/class/block/mmcblk0p1/size)" = 1024 ]
+[ "$(dd if=/dev/mmcblk0p1 bs=1 skip=2052 count=4 2>/dev/null)" = BCAB ]
+
+case " $(cat /proc/cmdline) " in
+ *' root=/dev/mmcblk0p26 '*) slot=a; offset=2061 ;;
+ *' root=/dev/mmcblk0p39 '*) slot=b; offset=2066 ;;
+ *) log 'Unknown root slot; refusing write'; exit 1 ;;
+esac
+
+# Wait (max 60 s) until the overlay is writable and ubus answers, instead of a
+# fixed 90 s sleep: a reboot inside that window used to skip confirmation.
+i=0
+while [ "$i" -lt 60 ]; do
+	if grep -q ' /overlay .*rw' /proc/mounts 2>/dev/null &&
+	   ubus call system board >/dev/null 2>&1; then
+		break
+	fi
+	sleep 3
+	i=$((i + 3))
+done
+if ! grep -q ' /overlay .*rw' /proc/mounts 2>/dev/null; then
+	log 'overlay not writable; boot not confirmed'
+	exit 1
+fi
+
+# 1) clear this slot's retry counter
+before=$(dd if=/dev/mmcblk0p1 bs=1 skip="$offset" count=1 2>/dev/null | hexdump -v -e '1/1 "%02x"')
+if [ "$before" != 00 ]; then
+	printf '\000' | dd of=/dev/mmcblk0p1 bs=1 seek="$offset" count=1 conv=notrunc 2>/dev/null
+	sync
+fi
+
+# 2) pin this slot as the preferred boot target (anti-rollback)
+if /usr/sbin/air6-ui-slotctl "$slot" --i-have-backed-up-misc >/tmp/air6-boot-confirm.log 2>&1; then
+	sync
+	log "slot=$slot retry=$before -> 00, priority pinned"
+else
+	log "slot=$slot retry=$before -> 00, priority pin failed (see /tmp/air6-boot-confirm.log)"
+fi

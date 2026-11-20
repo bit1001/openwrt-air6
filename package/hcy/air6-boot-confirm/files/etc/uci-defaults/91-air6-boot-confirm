@@ -1,0 +1,3 @@
+#!/bin/sh
+/etc/init.d/air6-boot-confirm enable
+exit 0
