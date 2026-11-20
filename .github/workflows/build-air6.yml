@@ -59,6 +59,11 @@ jobs:
           EOF
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          # Speed up SDK packing: upstream uses zstd --ultra -20 which can take
+          # 30-60 min on the multi-GB host toolchain. Lower compression level
+          # only changes archive size/speed, NOT SDK content or kernel vermagic.
+          sed -i "s/zstd -T0 --ultra -20/zstd -T0 -5/" target/sdk/Makefile
+          grep -n 'zstd -T0' target/sdk/Makefile
           make defconfig
           # Build the SDK from this exact tree so its toolchain, kernel headers,
           # Module.symvers and vermagic match the firmware byte-for-byte.
