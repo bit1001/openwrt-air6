@@ -100,18 +100,21 @@ jobs:
           # toolchain lacks sources like libquadmath.so). Selecting just the
           # target symbol builds only that package (+ deps autoselected).
           SYM="CONFIG_PACKAGE_$(echo "$PKG" | tr '/' '_')"
+          # Strip all pre-selected packages from the SDK's default .config so
+          # `make package/compile` builds ONLY this package + the dependencies
+          # its Kconfig selects — not the SDK's whole default package set.
+          sed -i -E 's/^(CONFIG_PACKAGE_[A-Za-z0-9_]+)=[ym]$/# \1 is not set/' .config
           echo "$SYM=y" >> .config
           make defconfig
           grep -E "^${SYM}=y" .config || { echo "ERROR: $SYM not enabled after defconfig (bad package name?)"; exit 1; }
+          echo "Selected packages to build:"
+          grep -E '^CONFIG_PACKAGE_.*=y$' .config | head -40
           if [ "${{ inputs.clean }}" = "true" ]; then
             make package/$PKG/clean || true
           fi
-          # Build ALL selected packages, not just the target. In an SDK the
-          # target staging libs (e.g. libcap for coreutils) are NOT prebuilt;
-          # defconfig autoselected them as =y alongside the target. `make
-          # package/<name>/compile` builds only the target and its configure
-          # fails on missing dep headers/libs. `make package/compile` builds the
-          # selected set in dependency order, staging libcap before coreutils.
+          # Build ALL selected packages in dependency order: the SDK has no
+          # prebuilt target staging libs, so a dep like libcap must be staged
+          # before a package whose configure needs it (e.g. coreutils).
           make -j"$(nproc)" package/compile 2>&1 | tee build-package.log \
             || make -j1 V=s package/compile 2>&1 | tee -a build-package.log
 
@@ -134,7 +137,7 @@ jobs:
         if: success()
         run: |
           if ! find sdkroot/bin -name '*.apk' -type f 2>/dev/null | grep -q .; then
-            echo "ERROR: build reported success but produced no .apk. Make sure the package name is valid and DEVELOPER=1 forces the build target."
+            echo "ERROR: build reported success but produced no .apk. Check the package name and the build log."
             exit 1
           fi
 
