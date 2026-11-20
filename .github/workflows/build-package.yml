@@ -89,11 +89,14 @@ jobs:
         run: |
           set -o pipefail
           PKG="${{ inputs.package }}"
+          # DEVELOPER=1 forces the BuildTarget rules to be generated even when
+          # CONFIG_PACKAGE_<name> is not selected in .config — required for
+          # ad-hoc SDK package builds. Without it make silently builds a no-op.
           if [ "${{ inputs.clean }}" = "true" ]; then
-            make package/$PKG/clean || true
+            make DEVELOPER=1 package/$PKG/clean || true
           fi
-          make package/$PKG/compile -j"$(nproc)" 2>&1 | tee build-package.log \
-            || make package/$PKG/compile -j1 V=s 2>&1 | tee -a build-package.log
+          make DEVELOPER=1 package/$PKG/compile -j"$(nproc)" 2>&1 | tee build-package.log \
+            || make DEVELOPER=1 package/$PKG/compile -j1 V=s 2>&1 | tee -a build-package.log
 
       - name: Collect .apk
         if: always()
@@ -102,7 +105,21 @@ jobs:
           if [ -f sdkroot/build-package.log ]; then
             grep -iE 'error:' sdkroot/build-package.log | head -n 30 >> "$GITHUB_STEP_SUMMARY" || true
           fi
-          find sdkroot/bin -name '*.apk' -type f 2>/dev/null | head -50
+          APKS=$(find sdkroot/bin -name '*.apk' -type f 2>/dev/null)
+          if [ -n "$APKS" ]; then
+            echo "Built packages:" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "$APKS" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "WARNING: no .apk produced" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fail if no .apk was built
+        if: success()
+        run: |
+          if ! find sdkroot/bin -name '*.apk' -type f 2>/dev/null | grep -q .; then
+            echo "ERROR: build reported success but produced no .apk. Make sure the package name is valid and DEVELOPER=1 forces the build target."
+            exit 1
+          fi
 
       - name: Upload log on failure
         uses: actions/upload-artifact@v4
