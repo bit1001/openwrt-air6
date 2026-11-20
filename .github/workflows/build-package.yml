@@ -106,8 +106,14 @@ jobs:
           if [ "${{ inputs.clean }}" = "true" ]; then
             make package/$PKG/clean || true
           fi
-          make -j"$(nproc)" package/$PKG/compile 2>&1 | tee build-package.log \
-            || make -j1 V=s package/$PKG/compile 2>&1 | tee -a build-package.log
+          # Build ALL selected packages, not just the target. In an SDK the
+          # target staging libs (e.g. libcap for coreutils) are NOT prebuilt;
+          # defconfig autoselected them as =y alongside the target. `make
+          # package/<name>/compile` builds only the target and its configure
+          # fails on missing dep headers/libs. `make package/compile` builds the
+          # selected set in dependency order, staging libcap before coreutils.
+          make -j"$(nproc)" package/compile 2>&1 | tee build-package.log \
+            || make -j1 V=s package/compile 2>&1 | tee -a build-package.log
 
       - name: Collect .apk
         if: always()
