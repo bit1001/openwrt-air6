@@ -112,14 +112,17 @@ jobs:
           if [ "${{ inputs.clean }}" = "true" ]; then
             make package/$PKG/clean || true
           fi
-          # Build ONLY the target package. Standard SDK usage: dependencies
-          # declared as BUILD_DEPENDS are auto-built by OpenWrt. Most packages
-          # (esp. pure Lua/config packages) build in seconds this way. Avoid
-          # `make package/compile` — that builds every =y package in the SDK's
-          # default config (takes 30+ min). Rare packages whose configure needs
-          # a lib declared only as runtime DEPENDS (e.g. coreutils/libcap) must
-          # be handled case-by-case; document this limitation.
-          make -j"$(nproc)" package/$PKG/compile 2>&1 | tee build-package.log \
+          # This trimmed SDK has no prebuilt target staging C libs. Many
+          # packages' configure needs headers from these base libs, which are
+          # declared as runtime DEPENDS (not BUILD_DEPENDS) so OpenWrt won't
+          # auto-build them. Stage the common ones first (they themselves only
+          # need the bundled musl toolchain). Best-effort: ignore any that are
+          # absent from this feed snapshot.
+          for DEP in libcap libacl libgmp libffi lua openssl zlib; do
+            make -j"$(nproc)" package/feeds/packages/$DEP/compile >> build-package.log 2>&1 || true
+          done
+          # Build ONLY the target package now that its likely C deps are staged.
+          make -j"$(nproc)" package/$PKG/compile 2>&1 | tee -a build-package.log \
             || make -j1 V=s package/$PKG/compile 2>&1 | tee -a build-package.log
 
       - name: Collect .apk
