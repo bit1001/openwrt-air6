@@ -70,7 +70,7 @@ jobs:
 
       - name: Unpack SDK
         run: |
-          SDK=$(find sdk -name 'openwrt-sdk-*.tar.zst' | head -n1)
+          SDK=$(find sdk -name 'openwrt-sdk-*.tar.zst' | sed -n '1p')
           [ -z "$SDK" ] && { echo "SDK tarball missing"; exit 1; }
           mkdir -p sdkroot
           tar --zstd -xf "$SDK" -C sdkroot --strip-components=1
@@ -108,7 +108,7 @@ jobs:
           make defconfig
           grep -E "^${SYM}=y" .config || { echo "ERROR: $SYM not enabled after defconfig (bad package name?)"; exit 1; }
           echo "Selected packages to build:"
-          grep -E '^CONFIG_PACKAGE_.*=y$' .config | head -40
+          grep -E '^CONFIG_PACKAGE_.*=y$' .config | sed -n '1,40p' || true
           if [ "${{ inputs.clean }}" = "true" ]; then
             make package/$PKG/clean || true
           fi
