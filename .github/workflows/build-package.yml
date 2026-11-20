@@ -119,7 +119,10 @@ jobs:
           # need the bundled musl toolchain). Best-effort: ignore any that are
           # absent from this feed snapshot.
           for DEP in libcap libacl libgmp libffi lua openssl zlib; do
-            make -j"$(nproc)" package/feeds/packages/$DEP/compile >> build-package.log 2>&1 || true
+            # 'install' (not just 'compile') runs Build/InstallDev, which copies
+            # headers/libs into staging_dir/target/<arch>/usr so downstream
+            # configure (e.g. coreutils' --enable-libcap) can find them.
+            make -j"$(nproc)" package/feeds/packages/$DEP/install >> build-package.log 2>&1 || true
           done
           # Build ONLY the target package now that its likely C deps are staged.
           make -j"$(nproc)" package/$PKG/compile 2>&1 | tee -a build-package.log \
