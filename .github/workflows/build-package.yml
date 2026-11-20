@@ -1,9 +1,14 @@
 name: Build package with AIR6 SDK
 
-# Compiles a single OpenWrt package (.apk) against the SDK that was produced by
-# build-air6.yml from the SAME source tree as the firmware — so the toolchain,
-# kernel headers, Module.symvers and vermagic match the flashed firmware and the
-# resulting .apk installs with `apk add --allow-untrusted <file>.apk`.
+# Compiles a single OpenWrt userspace package (.apk) against the SDK that was
+# produced by build-air6.yml from the SAME source tree as the firmware — so the
+# toolchain, headers, Module.symvers and vermagic match the flashed firmware and
+# the resulting .apk installs with `apk add --allow-untrusted <file>.apk`.
+#
+# LIMITATION: SDKs cannot build kmods (no kernel tree). Kernel modules such as
+# dae's kmod-sched-bpf / kmod-veth and BTF are already baked into the firmware
+# from the same source tree — do NOT try to compile them here. This workflow is
+# for userspace packages only (e.g. v2ray, luci-app-*, curl, coreutils).
 
 on:
   workflow_dispatch:
