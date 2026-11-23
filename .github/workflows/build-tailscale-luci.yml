@@ -1,0 +1,142 @@
+name: Build luci-app-tailscale-community with AIR6 SDK
+
+# Builds the LuCI panel from Tokisaki-Galaxy/luci-app-tailscale-community
+# against the AIR6 SDK produced by build-air6.yml (same firmware tree, so
+# toolchain / headers / vermagic match). Pure LuCI package: no kmods involved.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_ref:
+        description: "luci-app-tailscale-community ref (branch/tag/commit)"
+        required: false
+        type: string
+        default: "master"
+      sdk_run_id:
+        description: "Run ID of build-air6.yml to take the SDK from (blank = latest successful)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: build-tailscale-luci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compile:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd build-essential flex bison gawk \
+            gettext libncurses-dev libssl-dev python3 rsync unzip file wget \
+            curl libelf-dev
+
+      - name: Resolve SDK run ID
+        id: runid
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RID="${{ inputs.sdk_run_id }}"
+          if [ -z "$RID" ]; then
+            RID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build-air6.yml \
+              --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          fi
+          echo "Using SDK from run $RID"
+          echo "rid=$RID" >> "$GITHUB_OUTPUT"
+
+      - name: Download SDK artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p sdk
+          gh run download "${{ steps.runid.outputs.rid }}" \
+            --repo "$GITHUB_REPOSITORY" -n openwrt-air6-sdk --dir sdk
+          ls -lh sdk/
+
+      - name: Unpack SDK
+        run: |
+          SDK=$(find sdk -name 'openwrt-sdk-*.tar.zst' | sed -n '1p')
+          [ -z "$SDK" ] && { echo "SDK tarball missing"; exit 1; }
+          mkdir -p sdkroot
+          tar --zstd -xf "$SDK" -C sdkroot --strip-components=1
+          echo "SDK unpacked:"; ls sdkroot | head
+
+      - name: Checkout tailscale LuCI feed
+        uses: actions/checkout@v4
+        with:
+          repository: Tokisaki-Galaxy/luci-app-tailscale-community
+          ref: ${{ inputs.repo_ref }}
+          path: tailscale-feed
+
+      - name: Configure feeds (AIR6 base/luci + local tailscale feed)
+        working-directory: sdkroot
+        run: |
+          grep -E '^src-git (--root=package )?(base|luci) ' feeds.conf.default > feeds.conf
+          printf 'src-link local %s\n' "$GITHUB_WORKSPACE/tailscale-feed" >> feeds.conf
+          cat feeds.conf
+          ./scripts/feeds update base luci local
+          # luci.mk needs po2lmo / jsmin from the installed luci-base feed.
+          ./scripts/feeds install -p luci luci-base
+          # The upstream luci feed ships the same package; drop it so the
+          # local feed's Makefile is the one that gets compiled.
+          rm -f package/feeds/luci/luci-app-tailscale-community
+          rm -rf feeds/luci/applications/luci-app-tailscale-community
+          ./scripts/feeds install -p local \
+            luci-app-tailscale-community \
+            luci-i18n-community-zh-cn luci-i18n-community-zh-tw luci-i18n-community-pl
+          make defconfig
+
+          # Give the artifact a meaningful version (upstream Makefile has none).
+          VER=$(cd "$GITHUB_WORKSPACE/tailscale-feed" && git rev-parse --short HEAD)
+          sed -i "/include \$(TOPDIR)\/rules.mk/a PKG_VERSION:=4.5.2~$VER\nPKG_RELEASE:=1" \
+            feeds/local/luci-app-tailscale-community/Makefile
+          head -8 feeds/local/luci-app-tailscale-community/Makefile
+
+      - name: Build LuCI apk packages
+        working-directory: sdkroot
+        run: |
+          set -euo pipefail
+          PKGS=(luci-app-tailscale-community \
+                luci-i18n-community-zh-cn luci-i18n-community-zh-tw luci-i18n-community-pl)
+          ARGS=()
+          for p in "${PKGS[@]}"; do ARGS+=("package/$p/compile"); done
+          CFG=("${PKGS[@]/#/CONFIG_PACKAGE_}")
+          make "${ARGS[@]}" V=s "${CFG[@]/%/=m}" 2>&1 | tee build-tailscale.log
+
+      - name: Collect + verify .apk
+        if: always()
+        working-directory: sdkroot
+        run: |
+          echo "### Build result" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f build-tailscale.log ]; then
+            grep -iE 'error:' build-tailscale.log | sed -n '1,40p' >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+          APKS=$(find bin/packages -name '*.apk' -type f 2>/dev/null)
+          echo "$APKS" | tee -a "$GITHUB_STEP_SUMMARY"
+          if ! echo "$APKS" | grep -q 'luci-app-tailscale-community-'; then
+            echo "ERROR: no luci-app-tailscale-community apk produced"; exit 1
+          fi
+
+      - name: Upload log on failure
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-tailscale-log
+          path: sdkroot/build-tailscale.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload LuCI apks
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: air6-luci-app-tailscale-community
+          path: |
+            sdkroot/bin/packages/*/local/*.apk
+          if-no-files-found: error
+          retention-days: 14
