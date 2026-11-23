@@ -86,10 +86,11 @@ jobs:
           # local feed's Makefile is the one that gets compiled.
           rm -f package/feeds/luci/luci-app-tailscale-community
           rm -rf feeds/luci/applications/luci-app-tailscale-community
-          ./scripts/feeds install -p local \
-            luci-app-tailscale-community \
-            luci-i18n-community-zh-cn luci-i18n-community-zh-tw luci-i18n-community-pl
+          ./scripts/feeds install -p local
+          printf '%s\n' 'CONFIG_LUCI_LANG_zh_Hans=y' 'CONFIG_LUCI_LANG_zh_Hant=y' \
+            'CONFIG_LUCI_LANG_pl=y' 'CONFIG_LUCI_LANG_es=y' >> .config
           make defconfig
+          echo "Packages from local feed:"; ls package/feeds/local/
 
           # Give the artifact a meaningful version (upstream Makefile has none).
           VER=$(cd "$GITHUB_WORKSPACE/tailscale-feed" && git rev-parse --short HEAD)
@@ -101,8 +102,11 @@ jobs:
         working-directory: sdkroot
         run: |
           set -euo pipefail
-          PKGS=(luci-app-tailscale-community \
-                luci-i18n-community-zh-cn luci-i18n-community-zh-tw luci-i18n-community-pl)
+          PKGS=(luci-app-tailscale-community)
+          for p in $(ls package/feeds/local/ 2>/dev/null | grep '^luci-i18n-community-' || true); do
+            PKGS+=("$p")
+          done
+          echo "Building: ${PKGS[@]}"
           ARGS=()
           for p in "${PKGS[@]}"; do ARGS+=("package/$p/compile"); done
           CFG=("${PKGS[@]/#/CONFIG_PACKAGE_}")
