@@ -11,10 +11,11 @@ case "$OUTDIR" in
 	*) echo "Refusing unsafe output path: $OUTDIR" >&2; exit 1;;
 esac
 
-[ "$KERNEL_VERSION" = .44 ] || {
-	echo "Refusing repository build: expected Linux 6.18.44, got 6.18$KERNEL_VERSION" >&2
+[ -n "$KERNEL_VERSION" ] || {
+	echo "Cannot read LINUX_VERSION-6.18 from target/linux/generic/kernel-6.18" >&2
 	exit 1
 }
+KERNEL_RELEASE="6.18$KERNEL_VERSION"
 [ -f "$TOPDIR/public-key.pem" ] || {
 	echo "Missing APK public key: $TOPDIR/public-key.pem" >&2
 	exit 1
@@ -59,7 +60,7 @@ cp -p "$TOPDIR/public-key.pem" "$OUTDIR.new/mt6990-apk-public-key.pem"
 	cat > repository.manifest <<EOF
 board=air6
 target=mediatek/mt6990
-kernel=6.18.44
+kernel=$KERNEL_RELEASE
 architecture=$ARCH
 openwrt_revision=r35183-10631d244c
 target_packages=$TARGET_COUNT
@@ -74,7 +75,7 @@ EOF
 # AIR6 / MT6990 dedicated APK repository
 
 Packages in this branch are built with the AIR6 MT6990 firmware. They are
-restricted to Linux 6.18.44 and `aarch64_cortex-a55_neon-vfpv4`.
+restricted to Linux 6.18 and `aarch64_cortex-a55_neon-vfpv4`.
 
 Do not use these target/kernel packages on another OpenWrt device, and do not
 add generic OpenWrt snapshot feeds to AIR6/MT6990.
