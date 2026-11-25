@@ -1,0 +1,55 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Quectel BCAB eMMC layout used by this MT6990 A/B layout; no automatic reboot.
+set -eu
+action="${1:-show}"
+[ -b /dev/mmcblk0p1 ] && grep -qx 'PARTNAME=misc' /sys/class/block/mmcblk0p1/uevent &&
+ [ "$(cat /sys/class/block/mmcblk0p1/size)" = 1024 ] || { echo 'Wrong misc layout';exit 1; }
+[ "$(dd if=/dev/mmcblk0p1 bs=1 skip=2052 count=4 2>/dev/null)" = BCAB ] || { echo 'Unknown bootctrl magic';exit 1; }
+read_record() { dd if=/dev/mmcblk0p1 bs=1 skip=2060 count=10 2>/dev/null | hexdump -v -e '1/1 "%02x"'; }
+before="$(read_record)"
+[ "${#before}" = 20 ] || exit 1
+echo "current_record=$before"
+case "$action" in show) cat /proc/cmdline;exit 0;; a|b) :;; *) echo 'Usage: slotctl.sh show|a|b [--i-have-backed-up-misc [--enable-fallback|--disable-fallback]]';exit 1;; esac
+[ "${2:-}" = --i-have-backed-up-misc ] || { echo 'Back up your full misc first; explicit flag required';exit 1; }
+umask 077
+backup=$(mktemp /tmp/mt6990-slotctl-before.XXXXXX)
+pending=$(mktemp /tmp/mt6990-slotctl-pending.XXXXXX)
+trap 'rm -f "$pending"' EXIT
+dd if=/dev/mmcblk0p1 of="$backup" bs=1 skip=2060 count=10 2>/dev/null
+[ "$(hexdump -v -e '1/1 "%02x"' "$backup")" = "$before" ]
+cp "$backup" "$pending"
+
+case "$action" in
+ a) target_offset=0; other_offset=5 ;;
+ b) target_offset=5; other_offset=0 ;;
+esac
+
+# Quectel preloader skips retry-based rollback if the alternate slot
+# has already exceeded BOOT_CONTROL_MAX_RETRY (3).
+case "${3:-}" in
+ '') alternate='\016' ;;
+ --enable-fallback) alternate='\016\000' ;;
+ --disable-fallback) alternate='\016\004' ;;
+ *) exit 1 ;;
+esac
+printf '%b' "$alternate" | dd of="$pending" bs=1 seek="$other_offset" conv=notrunc 2>/dev/null
+printf '\017\000' | dd of="$pending" bs=1 seek="$target_offset" conv=notrunc 2>/dev/null
+expected=$(hexdump -v -e '1/1 "%02x"' "$pending")
+[ "${#expected}" -eq 20 ]
+if ! dd if="$pending" of=/dev/mmcblk0p1 bs=10 seek=206 count=1 conv=notrunc 2>/dev/null; then
+ dd if="$backup" of=/dev/mmcblk0p1 bs=10 seek=206 count=1 conv=notrunc 2>/dev/null || true
+ sync
+ echo 'Write failed; attempted restore. Do not reboot; inspect original misc backup.' >&2
+ exit 1
+fi
+sync
+after="$(read_record)"
+if [ "$after" != "$expected" ]; then
+ dd if="$backup" of=/dev/mmcblk0p1 bs=10 seek=206 count=1 conv=notrunc 2>/dev/null
+ sync
+ echo 'Readback mismatch; attempted original record restore. Do not reboot; inspect backup.' >&2
+ exit 1
+fi
+echo "verified_record=$after target=$action backup=$backup"
+echo 'No reboot performed. Reboot only after checking the target slot images.'

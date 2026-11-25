@@ -1,0 +1,3 @@
+config modem 'main'
+	option enabled '1'
+	option manual_stop '0'

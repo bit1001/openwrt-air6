@@ -1,0 +1,59 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+set -eu
+
+[ "$(cat /tmp/sysinfo/board_name)" = softbank,air6 ]
+case " $(cat /proc/cmdline) " in
+    *' bootslot=a '*) current=a; other=b ;;
+    *' bootslot=b '*) current=b; other=a ;;
+    *) exit 1 ;;
+esac
+
+umask 077
+exec 9>/var/lock/air6-slot-manage.lock
+flock -n 9
+slotctl=/usr/libexec/air6-luci-slotctl
+
+case "$1" in
+    status) target='' ;;
+    auto|disable) target=$current ;;
+    other) target=$other ;;
+    *) exit 1 ;;
+esac
+
+read_state() {
+    record=$("$slotctl" show) || return 1
+    hex=$(printf '%s\n' "$record" | sed -n 's/^current_record=//p')
+    [ "${#hex}" -eq 20 ] || return 1
+    priority_a=$(printf '%s' "$hex" | cut -c1-2)
+    priority_b=$(printf '%s' "$hex" | cut -c11-12)
+    if [ "$((0x$priority_a))" -ge "$((0x$priority_b))" ]; then
+        preferred=a
+        backup_retry=$(printf '%s' "$hex" | cut -c13-14)
+    else
+        preferred=b
+        backup_retry=$(printf '%s' "$hex" | cut -c3-4)
+    fi
+    if [ "$((0x$backup_retry))" -gt 3 ]; then
+        fallback=false
+    else
+        fallback=true
+    fi
+}
+read_state
+if [ -n "$target" ]; then
+    case "$1:$fallback" in
+        disable:*|other:false) expected_fallback=false; policy=--disable-fallback ;;
+        *) expected_fallback=true; policy=--enable-fallback ;;
+    esac
+    backup=$(mktemp /tmp/air6-slot-misc.XXXXXX)
+    trap 'rm -f "$backup"' EXIT
+    dd if=/dev/mmcblk0p1 of="$backup" bs=4096 count=128 2>/dev/null
+    [ "$(wc -c < "$backup")" -eq 524288 ]
+    mv -f "$backup" /tmp/air6-slot-misc-last.img
+    "$slotctl" "$target" --i-have-backed-up-misc "$policy" >/dev/null
+    read_state
+    [ "$preferred" = "$target" ] && [ "$fallback" = "$expected_fallback" ] || exit 1
+fi
+
+printf '{"current":"%s","other":"%s","preferred":"%s","fallback":%s}\n' "$current" "$other" "$preferred" "$fallback"

@@ -488,6 +488,44 @@ wait_modem_stack_ready() {
     return 1
 }
 
+air6_read_sim_slot() {
+    local response attempt expected="${1:-}"
+    for attempt in 1 2 3; do
+        response="$(timeout 10 /usr/bin/modem5g-at 'AT+QUIMSLOT?' 2>/dev/null)" || response=
+        case "$(printf '%s\n' "$response" | tr -d '\r' |
+            sed -n 's/^+QUIMSLOT:[[:space:]]*\([12]\)[[:space:]]*$/\1/p')" in
+            1) echo 1; return 0 ;;
+            2) [ "$expected" = 1 ] || { echo 2; return 0; } ;;
+        esac
+        [ "$attempt" -eq 3 ] || sleep 2
+    done
+    return 1
+}
+
+# SIM2 is the embedded SIM on AIR6. Verify the physical slot before selecting
+# the APN or starting a data call, including on recovery. No online polling.
+air6_require_sim1() {
+    local current sim_status attempt
+    current="$(air6_read_sim_slot)" || return 1
+    [ "$current" = 2 ] || return 0
+
+    echo 'AIR6 SIM2 active; selecting physical SIM1'
+    timeout 10 /usr/bin/modem5g-at 'AT+QUIMSLOT=1' >/dev/null 2>&1 || return 1
+    sleep 3
+    air6_read_sim_slot 1 >/dev/null || return 1
+
+    # A verified slot number can precede SIM initialization. Give SIM1 time
+    # to become readable before the existing APN auto-provision call.
+    for attempt in 1 2 3; do
+        sim_status="$(timeout 5 mipc_wan_cli --show_sim_status 2>/dev/null)" || sim_status=
+        case "$sim_status" in
+            MIPC_SIM_STATUS_COMPLETE_READY|MIPC_SIM_STATUS_SIM_PIN|MIPC_SIM_STATUS_SIM_PUK) break ;;
+        esac
+        [ "$attempt" -eq 3 ] || sleep 2
+    done
+    return 0
+}
+
 # This is a reference design by Mediatek
 proto_ql_datacall_setup() {
     local interface="$1"
@@ -575,6 +613,15 @@ proto_ql_datacall_setup() {
     # (APN timeout vs. repeated EBUSY) on the OpenWrt procd startup sequence.
     echo "Enable modem radio before SIM/APN provisioning"
     mipc_wan_cli --nw_radio_state_set 1
+
+    if [ "$interface" = modem5g ] && [ "$(cat /tmp/sysinfo/board_name)" = softbank,air6 ]; then
+        if ! air6_require_sim1; then
+            echo 'AIR6 physical SIM1 could not be verified; delaying data setup'
+            proto_notify_error "$interface" SIM1_NOT_VERIFIED
+            return 1
+        fi
+        echo 'AIR6 physical SIM1 verified'
+    fi
 
     # Check APN provision from SIM
     if [ "$auto_conf" = "1" ] ; then
@@ -733,6 +780,15 @@ proto_ql_datacall_setup() {
     json_get_var v6_mtu v6_mtu
     json_get_var clatd clatd
 
+    # A link-local or placeholder address cannot supply a routed LAN prefix.
+    case "$v6_addr" in
+        ''|::|::1|0:0:0:0:0:0:0:0|0:0:0:0:0:0:0:1|[fF][eE][89aAbB]*:*|[fF][fF]*:*)
+            v6_addr=''
+            v6_prefix=''
+            v6_gw=''
+            ;;
+    esac
+
     # Check ifname is up before notify OpenWRT
     # Because of PDN may be activated & deactivated soon by modem during IPv6 global address checking
     if_check=$(ip link show $ifname up)
@@ -824,7 +880,7 @@ proto_ql_datacall_setup() {
         fi
         if [ -n "$staticipv6" ] && [ -n "$staticipv6prefix" ] && [ -n "$staticgwv6" ]; then
             proto_add_ipv6_address "${staticipv6}" "128"
-            proto_add_ipv6_prefix "${staticipv6:0:20}:/${staticipv6prefix}"
+            proto_add_ipv6_prefix "${staticipv6}/${staticipv6prefix}"
             proto_add_ipv6_route "::0" 0 "$staticgwv6"
             if [ -n "$staticdnsv6" ] ; then
                 proto_add_dns_server "${staticdnsv6}"
@@ -833,8 +889,8 @@ proto_ql_datacall_setup() {
             if [ -n "$v6_addr" ] ; then
                 proto_add_ipv6_address "${v6_addr}" "128"
             fi
-            if [ -n "$v6_prefix" ] ; then
-                proto_add_ipv6_prefix "${v6_addr:0:20}:/${v6_prefix}"
+            if [ -n "$v6_addr" ] && [ -n "$v6_prefix" ]; then
+                proto_add_ipv6_prefix "${v6_addr}/${v6_prefix}"
             fi
             if [ -n "$v6_gw" ] ; then
                 proto_add_ipv6_route "::0" 0 "$v6_gw"
@@ -879,6 +935,24 @@ proto_ql_datacall_setup() {
         json_add_string "vlan" "$vlan"
         proto_close_data
         proto_send_update "$interface"
+
+        # The cellular PDN may supply its global /64 only via RA. The
+        # dynamic child follows the PDN device across disconnects and redials.
+        if [ -z "$staticipv6" ] && { [ -z "$v6_addr" ] || [ -z "$v6_prefix" ] || [ -z "$v6_gw" ]; }; then
+            case "$iptype" in
+                2|3)
+                    json_init
+                    json_add_string name "${interface}_6"
+                    json_add_string ifname "@$interface"
+                    json_add_string proto dhcpv6
+                    json_add_string reqaddress none
+                    json_add_string reqprefix no
+                    proto_add_dynamic_defaults
+                    json_add_string extendprefix 1
+                    ubus call network add_dynamic "$(json_dump)"
+                    ;;
+            esac
+        fi
 
         ql_update_mtu "$v4_mtu" "$vlan"
 

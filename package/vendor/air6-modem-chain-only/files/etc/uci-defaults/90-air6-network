@@ -37,6 +37,13 @@ if [ "$(uci -q get network.wan.proto)" = "ql_datacall" ] || \
 	changed=1
 fi
 
+# Reserve a LAN /64 for netifd prefix assignment and odhcpd advertisement.
+# Preserve an explicit LAN prefix length set by the administrator.
+if [ "$(uci -q get network.lan)" = interface ] && ! uci -q get network.lan.ip6assign >/dev/null; then
+	uci -q set network.lan.ip6assign=64
+	changed=1
+fi
+
 [ "$changed" = 0 ] || uci -q commit network
 
 # Attach by zone name, never by a positional @zone index.  The modem is a WAN

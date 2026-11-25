@@ -1,0 +1,60 @@
+#!/bin/sh
+# Recovery policy adapted from the AIR6 QModem adapter. netifd owns data setup.
+set -eu
+[ "$(cat /tmp/sysinfo/board_name)" = softbank,air6 ] || exit 2
+# Only one policy owner may run. Explicit migration disables QModem first.
+[ "$(uci -q get qmodem.main.enable_dial || true)" != 1 ] || {
+    logger -t air6-modem-manager 'QModem policy still enabled; refusing competing ownership'
+    exit 2
+}
+exec 9>/var/lock/air6-modem-policy.lock
+flock -w 20 9 || exit 75
+trap 'ifdown modem5g; exit 0' TERM INT
+# netifd may already be waiting for the modem stack. An unconditional ifup
+# aborts that pending setup and invokes teardown while RF is still off.
+initial_status=$(ubus call network.interface.modem5g status 2>/dev/null || true)
+initial_up=$(printf '%s' "$initial_status" | jsonfilter -e '@.up' || true)
+initial_pending=$(printf '%s' "$initial_status" | jsonfilter -e '@.pending' || true)
+if [ "$initial_up" = true ] || [ "$initial_pending" = true ]; then
+    logger -t air6-modem-manager "Policy started; preserving active or pending netifd setup"
+else
+    logger -t air6-modem-manager "Policy started; requesting initial netifd setup"
+    ifup modem5g || true
+fi
+# Recover a genuinely idle/down netifd interface while dial policy is enabled.
+# Pending setup and explicit modem-control transactions retain their ownership.
+down_checks=0
+cooldown=0
+while :; do
+    [ "$(uci -q get air6_modem.main.enabled || true)" = 1 ] || break
+    [ "$(uci -q get air6_modem.main.manual_stop || true)" != 1 ] || break
+    [ "$(uci -q get air6_modem.main.radio_off || true)" != 1 ] || break
+    sleep 15
+    [ "$cooldown" -eq 0 ] || cooldown=$((cooldown-1))
+    if [ -e /tmp/air6-modem-control.active ] || [ -d /var/lock/air6-modem-recovery.lock ] ||
+       [ -d /tmp/air6-modem-control-queued ] || pidof mipc_wan_cli >/dev/null 2>&1; then
+        down_checks=0
+        continue
+    fi
+    status=$(ubus call network.interface.modem5g status 2>/dev/null) || { down_checks=0; continue; }
+    up=$(printf '%s' "$status" | jsonfilter -e '@.up' || true)
+    pending=$(printf '%s' "$status" | jsonfilter -e '@.pending' || true)
+    available=$(printf '%s' "$status" | jsonfilter -e '@.available' || true)
+    [ -n "$up" ] && [ -n "$pending" ] && [ -n "$available" ] || {
+        logger -t air6-modem-manager "Incomplete netifd status; keeping policy alive"
+        down_checks=0
+        continue
+    }
+    if [ "$up" = false ] && [ "$pending" = false ] && [ "$available" = true ]; then
+        down_checks=$((down_checks+1))
+        if [ "$down_checks" -ge 3 ] && [ "$cooldown" -eq 0 ]; then
+            logger -t air6-modem-manager 'Data interface idle/down for three checks; requesting netifd reconnect'
+            ifup modem5g || true
+            down_checks=0
+            cooldown=8
+        fi
+    else
+        down_checks=0
+    fi
+done
+ifdown modem5g

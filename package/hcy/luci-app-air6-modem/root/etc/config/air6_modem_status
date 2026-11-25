@@ -1,2 +1,2 @@
 config air6_modem_status 'main'
-	option poll_seconds '5'
+	option poll_seconds '30'

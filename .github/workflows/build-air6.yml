@@ -85,6 +85,19 @@ jobs:
             make -j"$(nproc)" 2>&1 | tee build.log || make -j1 V=s 2>&1 | tee -a build.log
           fi
 
+      - name: Package sysupgrade tar bundle
+        if: success()
+        run: |
+          cd bin/targets/mediatek/mt6990/
+          BOOT_IMG=$(find . -maxdepth 1 -name '*boot.img' | head -n1)
+          ROOTFS_IMG="rootfs.img"
+          if [ -f "$BOOT_IMG" ] && [ -f "$ROOTFS_IMG" ]; then
+            cp -f "$BOOT_IMG" boot.img
+            tar -cvf openwrt-softbank-air6-tar.bin boot.img "$ROOTFS_IMG"
+            rm -f boot.img
+            ls -lh openwrt-softbank-air6-tar.bin
+          fi
+
       - name: Summarize build outputs
         if: always()
         run: |

@@ -2,6 +2,43 @@
 set -e
 cfg=/etc/air6-wifi
 mod=/usr/lib/air6-wifi/modules
+
+# LuCI asks iwinfo for the UCI radio name, while the vendor driver
+# registers kernel PHYs and interfaces such as ra0, rai0 and rax0.
+sync_radio_config() (
+	stage="$(mktemp -d /tmp/air6-wireless-uci.XXXXXX)"
+	trap 'rm -f "$stage/wireless"; rmdir "$stage"' EXIT
+
+	for radio in MT7992_1_1 MT7992_1_2 MT7992_1_3; do
+		[ "$(uci -q -t "$stage" get "wireless.$radio")" = wifi-device ] || continue
+		[ "$(uci -q -t "$stage" get "wireless.$radio.vendor")" = mediatek ] || continue
+
+		prefix="$(uci -q -t "$stage" get "wireless.$radio.main_ifname")" || continue
+		case "$prefix" in
+			ra|rai|rax) ;;
+			*) continue ;;
+		esac
+		phy="$(readlink "/sys/class/net/${prefix}0/phy80211")" || continue
+		phy="${phy##*/}"
+		[ -r "/sys/class/ieee80211/$phy/index" ] || continue
+		if [ "$(uci -q -t "$stage" get "wireless.$radio.phy")" != "$phy" ]; then
+			uci -q -t "$stage" set "wireless.$radio.phy=$phy"
+		fi
+
+		# An empty LuCI frequency selector could erase these values.
+		# Recover missing options from the shipped config.
+		for option in band channel; do
+			[ -z "$(uci -q -t "$stage" get "wireless.$radio.$option")" ] || continue
+			value="$(uci -q -t "$stage" -c /rom/etc/config get "wireless.$radio.$option")" || continue
+			[ -n "$value" ] && uci -q -t "$stage" set "wireless.$radio.$option=$value"
+		done
+	done
+
+	if [ -n "$(uci -q -t "$stage" changes wireless)" ]; then
+		uci -q -t "$stage" commit wireless
+	fi
+)
+
 /usr/sbin/air6-factory-e2p
 mkdir -p /tmp/air6-wifi/wireless
 cp -a /etc/wireless/mediatek/. /tmp/air6-wifi/wireless/
@@ -36,9 +73,12 @@ done
 echo "load mt7990"
 insmod "$mod/mt7990.ko" option_type=6 rro_enable=0 intr_option_set=1 || true
 n=0
-until [ -d /sys/class/net/ra0 ] || [ "$n" -ge 15 ]; do
+until { [ -e /sys/class/net/ra0/phy80211 ] &&
+	[ -e /sys/class/net/rai0/phy80211 ] &&
+	[ -e /sys/class/net/rax0/phy80211 ]; } || [ "$n" -ge 15 ]; do
 	n=$((n+1)); sleep 1
 done
+sync_radio_config
 if [ -d /sys/class/net/ra0 ]; then
 	echo "wifi interface ready"
 fi

@@ -1,0 +1,28 @@
+#!/bin/sh
+# Keep bounded RIL control/rollback independent of the LuCI request timeout.
+state=/tmp/air6-modem-control-job.json
+guard=/tmp/air6-modem-control-queued
+cleanup() {
+    if [ "$(jq -r '.status // ""' "$state" 2>/dev/null)" = pending ]; then
+        printf '%s\n' '{"status":"0","message":"Modem control worker was interrupted; query current settings before retrying"}' > "$state.interrupted"
+        mv "$state.interrupted" "$state"
+    fi
+    rm -f "$guard/pid"
+    rmdir "$guard" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+case "$1" in
+band) /usr/libexec/air6-modem-band air6 "$2" ;;
+rat) /usr/libexec/air6-modem-rat "$2" ;;
+radio) /usr/libexec/air6-modem-radio "$2" ;;
+ca) /usr/libexec/air6-modem-ca "$2" ;;
+*) exit 2 ;;
+esac > /tmp/air6-modem-control-job-result.json 2>/tmp/air6-modem-control-job-error.log
+rc=$?
+if jq -e 'type=="object" and has("status") and has("message")' /tmp/air6-modem-control-job-result.json >/dev/null 2>&1; then
+    cp /tmp/air6-modem-control-job-result.json "$state.new"
+else
+    jq -nc --arg rc "$rc" '{status:"0",message:("Native modem control failed ("+$rc+")")}' > "$state.new"
+fi
+mv "$state.new" "$state"

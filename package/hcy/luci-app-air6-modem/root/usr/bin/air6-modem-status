@@ -1,22 +1,112 @@
 #!/bin/sh
 # Read-only vendor API collector. Completed snapshots are published atomically.
 # Each worker has a hard deadline; a stalled RIL cannot block rpcd or the UI.
+# Also exports the small key=value state file consumed by /usr/bin/air6-panel-led.
 umask 077
 SNAP=/tmp/air6-modem-status.json
+STATE=/tmp/air6-modem-status.state
 NEW=/tmp/air6-modem-status.$$.json
 LOCK=/tmp/air6-modem-status-api.lock
+REQUEST=/var/run/air6-modem-status.request
+IDLE_INTERVAL=30
+AMBR=/tmp/air6-modem-ambr.json
+AMBR_NEW=/tmp/air6-modem-ambr.$$.json
+ambr_key=
+ambr_first_seen=0
+ambr_last_query=0
 exec 9>"$LOCK"
 flock -n 9 || exit 0
-trap 'rm -f "$NEW"; exit 0' INT TERM
+trap 'rm -f "$NEW" "$AMBR_NEW"; exit 0' INT TERM
 interval="$(uci -q get air6_modem_status.main.poll_seconds)"
-case "$interval" in ''|*[!0-9]*) interval=5;; esac
-[ "$interval" -ge 2 ] && [ "$interval" -le 60 ] || interval=5
+case "$interval" in
+	[3-5][0-9]|60) ;;
+	*) interval=30 ;;
+esac
+
+publish_state() {
+	timeout 5 /usr/bin/ucode -e '
+		let fs = require("fs");
+		let j = json(fs.readfile(ARGV[0]) || "{}");
+		if (!j || type(j) != "object") exit(1);
+		let sim = "" + (j.SIM || "");
+		let sim_state = (sim == "READY") ? "MIPC_SIM_STATUS_COMPLETE_READY" : sim;
+		let rat = "" + (j.RAT || "");
+		let rat_state = match(rat, /^(NR|NR5G)/i) ? "5G" : (length(rat) ? "4G" : "");
+		let rsrp = (j.RSRP == null) ? "" : "" + j.RSRP;
+		let out = "SIM=" + sim_state + "\nREGISTERED=" + (j.REGISTERED || "") +
+			"\nRAT=" + rat_state + "\nRSRP=" + rsrp + "\n";
+		fs.writefile("/tmp/air6-modem-status.state.new", out);
+	' "$1" || return 0
+	mv -f /tmp/air6-modem-status.state.new "$STATE" 2>/dev/null || true
+}
+
+clear_ambr() {
+	ambr_key=
+	rm -f "$AMBR"
+}
+
+collect_ambr() {
+	local kind network cid device uptime now connected_since key delta rates
+	case "$(jsonfilter -i "$SNAP" -e '@.RAT')" in
+		NR5G-SA) kind=5gs;;
+		LTE|NR5G-NSA) kind=eps;;
+		*) clear_ambr; return;;
+	esac
+	network="$(ubus -t 2 call network.interface.modem5g status)" || { clear_ambr; return; }
+	[ "$(jsonfilter -s "$network" -e '@.up')" = true ] || { clear_ambr; return; }
+	cid="$(jsonfilter -s "$network" -e '@.data.cid')"
+	device="$(jsonfilter -s "$network" -e '@.l3_device')"
+	uptime="$(jsonfilter -s "$network" -e '@.uptime')"
+	case "$cid" in ''|*[!0-9]*) clear_ambr; return;; esac
+	case "$uptime" in ''|*[!0-9]*) clear_ambr; return;; esac
+	case "$device" in
+		ccmni*) case "${device#ccmni}" in ''|*[!0-9]*) clear_ambr; return;; esac;;
+		*) clear_ambr; return;;
+	esac
+
+	now="$(date +%s)"
+	connected_since=$((now - uptime))
+	key="$kind:$device:$cid"
+	delta=$((connected_since - ambr_first_seen))
+	if [ "$key" = "$ambr_key" ] && [ "$delta" -ge -2 ] && [ "$delta" -le 2 ] &&
+	   [ "$now" -ge "$ambr_last_query" ] && [ $((now - ambr_last_query)) -lt 120 ]; then
+		return
+	fi
+
+	ambr_key="$key"
+	ambr_first_seen="$connected_since"
+	ambr_last_query="$now"
+	if rates="$(timeout 4 /usr/bin/air6-session-ambr "$kind" "$cid")"; then
+		printf '{"kind":"%s","device":"%s","updated":%s,"connected_since":%s,"rates":%s}\n' \
+			"$kind" "$device" "$now" "$connected_since" "$rates" >"$AMBR_NEW" && mv -f "$AMBR_NEW" "$AMBR"
+	else
+		rm -f "$AMBR"
+	fi
+}
+
+next_basic=0
+next_detail=0
 while :; do
-    if timeout 20 /usr/bin/air6-nw-api >"$NEW" 2>/tmp/air6-modem-api-error; then
-        chmod 600 "$NEW"
-        mv -f "$NEW" "$SNAP"
-    else
-        rm -f "$NEW"
-    fi
-    sleep "$interval"
+	# Use uptime so NTP adjustments cannot trigger extra modem queries.
+	read -r uptime _ </proc/uptime
+	now="${uptime%%.*}"
+	if [ -e "$REQUEST" ] && [ "$now" -ge "$next_detail" ]; then
+		rm -f "$REQUEST"
+		next_detail=$((now + interval))
+		next_basic=$((now + IDLE_INTERVAL))
+		if timeout 20 /usr/bin/air6-nw-api >"$NEW" 2>/tmp/air6-modem-api-error; then
+			mv -f "$NEW" "$SNAP"
+			publish_state "$SNAP"
+			collect_ambr
+		else
+			rm -f "$NEW"
+		fi
+	elif [ "$now" -ge "$next_basic" ]; then
+		next_basic=$((now + IDLE_INTERVAL))
+		if timeout 10 /usr/bin/air6-nw-api --basic >"$NEW" 2>/tmp/air6-modem-api-error; then
+			publish_state "$NEW"
+		fi
+		rm -f "$NEW"
+	fi
+	sleep 2
 done

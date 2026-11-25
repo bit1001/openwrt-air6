@@ -1,0 +1,76 @@
+#!/bin/sh
+# User-triggered native RIL band transaction for the embedded AIR6 only.
+set -u
+section=${1:-}
+payload=${2:-}
+[ "$(cat /tmp/sysinfo/board_name)" = softbank,air6 ] || exit 2
+[ "$section" = air6 ] || exit 2
+[ "$(uci -q get qmodem.main.enable_dial)" != 1 ] || exit 75
+reply() { jq -nc --arg status "$1" --arg message "$2" '{status:$status,message:$message}'; }
+[ "$(uci -q get air6_modem.main.radio_off || true)" != 1 ] || { reply 0 'Enable radio before changing bands or RAT'; exit 75; }
+[ "$(uci -q get air6_modem.main.radio_off || true)" != 1 ] || { reply 0 'Enable radio before changing bands or RAT'; exit 75; }
+exec 8>/var/lock/air6-modem-control.lock
+flock -n 8 || { reply 0 'Another band operation is running'; exit 75; }
+raw=$(printf '%s' "$payload" | jq -r 'if type=="string" then fromjson else . end | .lock_band | select(type=="string")')
+case "$raw" in ''|*[!0-9,]*|,*|*,|*,,*) reply 0 'Invalid band selection'; exit 2;; esac
+spec=$(printf '%s' "$payload" | jq -c 'if type=="string" then fromjson else . end | select(.band_class=="LTE" or .band_class=="NR") | .lock_band |= (split(",") | map(tonumber) | unique | sort) | select(.lock_band|length>0)')
+[ -n "$spec" ] || { reply 0 'Invalid band selection'; exit 2; }
+original=$(timeout 20 /usr/bin/air6-nw-api --bands) || { reply 0 'Native band query failed'; exit 3; }
+rat=$(printf '%s' "$spec" | jq -r .band_class)
+selected=$(printf '%s' "$spec" | jq -c .lock_band)
+printf '%s' "$original" | jq -e --arg rat "$rat" --argjson bands "$selected" '.supported.error==0 and .current.error==0 and (($bands - .supported[$rat])|length==0)' >/dev/null || { reply 0 'Selection includes a band the modem does not report as supported'; exit 2; }
+previous=$(printf '%s' "$original" | jq -c .current)
+next=$(printf '%s' "$previous" | jq -c --arg rat "$rat" --argjson bands "$selected" '.[$rat]=$bands')
+if [ "$previous" = "$next" ]; then reply 1 'Selected bands are already active'; exit 0; fi
+old_lte=$(printf '%s' "$previous" | jq -r '.LTE|join(",")')
+old_nr=$(printf '%s' "$previous" | jq -r '.NR|join(",")')
+lte=$(printf '%s' "$next" | jq -r '.LTE|join(",")')
+nr=$(printf '%s' "$next" | jq -r '.NR|join(",")')
+[ -n "$old_lte" ] && [ -n "$old_nr" ] || { reply 0 'Cannot preserve the original band masks'; exit 3; }
+was_up=$(ubus call network.interface.modem5g status | jsonfilter -e '@.up')
+was_running=false
+if [ "$(uci -q get air6_modem.main.enabled)" = 1 ] && [ "$(uci -q get air6_modem.main.manual_stop)" != 1 ]; then was_running=true; fi
+restore_dial() {
+    if [ "$was_running" = true ]; then
+        /etc/init.d/air6-modem-manager start >/dev/null 2>&1
+    elif [ "$was_up" = true ]; then
+        ifup modem5g >/dev/null 2>&1
+    fi
+}
+trap restore_dial EXIT
+changed=0
+interrupted() {
+    trap '' INT TERM
+    if [ "$changed" = 1 ]; then
+        /usr/bin/air6-modem-chain-lock apply-bands "$old_lte" "$old_nr" >>/tmp/air6-modem-band-operation.log 2>&1
+        rollback=$(timeout 20 /usr/bin/air6-nw-api --bands)
+        if printf '%s' "$rollback" | jq -e --argjson expected "$previous" '.current.error==0 and .current.LTE==$expected.LTE and .current.NR==$expected.NR' >/dev/null; then
+            reply 0 'Band control interrupted; original masks restored'
+        else
+            reply 0 'Band control interrupted and rollback failed; inspect modem state'
+        fi
+    else
+        reply 0 'Band control interrupted before applying a change'
+    fi
+    exit 130
+}
+trap interrupted INT TERM
+/etc/init.d/air6-modem-manager stop >/dev/null 2>&1 && ifdown modem5g >/dev/null 2>&1 || { reply 0 'Cannot stop the data worker'; exit 4; }
+log=/tmp/air6-modem-band-operation.log
+changed=1
+/usr/bin/air6-modem-chain-lock apply-bands "$lte" "$nr" >"$log" 2>&1
+rc=$?
+actual=$(timeout 20 /usr/bin/air6-nw-api --bands) || rc=5
+if [ "$rc" = 0 ] && printf '%s' "$actual" | jq -e --argjson expected "$next" '.current.error==0 and .current.LTE==$expected.LTE and .current.NR==$expected.NR' >/dev/null; then
+ reply 1 'Band masks applied and verified; mobile data is reconnecting'
+ exit 0
+fi
+# Restore both original masks on refusal or partial application.
+/usr/bin/air6-modem-chain-lock apply-bands "$old_lte" "$old_nr" >>"$log" 2>&1
+rollback=$(timeout 20 /usr/bin/air6-nw-api --bands)
+if printf '%s' "$rollback" | jq -e --argjson expected "$previous" '.current.error==0 and .current.LTE==$expected.LTE and .current.NR==$expected.NR' >/dev/null; then
+ reply 0 'Band operation failed; original masks restored'
+else
+ reply 0 'Band operation and rollback failed; inspect /tmp/air6-modem-band-operation.log'
+fi
+exit 5

@@ -88,14 +88,21 @@ define Package/$(PKG_NAME)/install
 		$(1)/www/luci-static/resources/air6modem/common_v2.js
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/air6modem/i18n.js \
 		$(1)/www/luci-static/resources/air6modem/i18n.js
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/air6modem/control_v1.js \
+		$(1)/www/luci-static/resources/air6modem/control_v1.js
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/air6modem/bandauth_card.js \
+		$(1)/www/luci-static/resources/air6modem/bandauth_card.js
 
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/i18n
 	$(INSTALL_DATA) ./files/usr/lib/lua/luci/i18n/luci-app-air6-modem.en.lmo \
 		$(1)/usr/lib/lua/luci/i18n/luci-app-air6-modem.en.lmo
+	[ ! -f ./files/usr/lib/lua/luci/i18n/air6-modem.zh-cn.lmo ] || \
+		$(INSTALL_DATA) ./files/usr/lib/lua/luci/i18n/air6-modem.zh-cn.lmo \
+			$(1)/usr/lib/lua/luci/i18n/air6-modem.zh-cn.lmo
 
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/air6modem
-	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/air6modem/overview_v10.js \
-		$(1)/www/luci-static/resources/view/air6modem/overview_v10.js
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/air6modem/overview_v11.js \
+		$(1)/www/luci-static/resources/view/air6modem/overview_v11.js
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/air6modem/bands_v3.js \
 		$(1)/www/luci-static/resources/view/air6modem/bands_v3.js
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/view/air6modem/network_v5.js \

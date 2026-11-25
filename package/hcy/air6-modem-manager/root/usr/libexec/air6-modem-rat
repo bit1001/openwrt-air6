@@ -1,0 +1,62 @@
+#!/bin/sh
+# Serialized mode change with bounded readback and rollback.
+set -u
+mode=${1:-}
+reply() { jq -nc --arg status "$1" --arg message "$2" '{status:$status,message:$message}'; }
+case "$mode" in 3|15|19|21) ;; *) reply 0 'Invalid RAT mode'; exit 2;; esac
+[ "$(cat /tmp/sysinfo/board_name)" = softbank,air6 ] || exit 2
+[ "$(uci -q get qmodem.main.enable_dial)" != 1 ] || { reply 0 'QModem still owns modem controls'; exit 75; }
+[ "$(uci -q get air6_modem.main.radio_off || true)" != 1 ] || { reply 0 'Enable radio before changing bands or RAT'; exit 75; }
+[ "$(uci -q get air6_modem.main.radio_off || true)" != 1 ] || { reply 0 'Enable radio before changing bands or RAT'; exit 75; }
+exec 8>/var/lock/air6-modem-control.lock
+flock -n 8 || { reply 0 'Another modem control is running'; exit 75; }
+get_rat() { timeout 8 /usr/bin/mipc_wan_cli --nw_get_rat 2>/dev/null | sed -n 's/^RAT Mode Value: *\([0-9]*\).*/\1/p'; }
+# Query only when setup is idle. No data teardown on invalid original state.
+pidof mipc_wan_cli >/dev/null 2>&1 && { reply 0 'Modem setup is busy'; exit 75; }
+original=$(get_rat)
+case "$original" in 3|15|19|21) ;; *) reply 0 'Cannot read original RAT; no change applied'; exit 3;; esac
+[ "$mode" != "$original" ] || { reply 1 'Selected RAT is already active'; exit 0; }
+was_up=$(ubus call network.interface.modem5g status | jsonfilter -e '@.up')
+was_running=false
+if [ "$(uci -q get air6_modem.main.enabled)" = 1 ] && [ "$(uci -q get air6_modem.main.manual_stop)" != 1 ]; then was_running=true; fi
+restore_dial() {
+    if [ "$was_running" = true ]; then
+        /etc/init.d/air6-modem-manager start >/dev/null 2>&1
+    elif [ "$was_up" = true ]; then
+        ifup modem5g >/dev/null 2>&1
+    fi
+}
+trap restore_dial EXIT
+changed=0
+interrupted() {
+    # Ignore repeat catchable signals while the bounded rollback completes.
+    trap '' INT TERM
+    if [ "$changed" = 1 ]; then
+        timeout 15 /usr/bin/mipc_wan_cli --nw_set_rat "$original" >>/tmp/air6-modem-rat-operation.log 2>&1
+        rollback=$(get_rat)
+        if [ "$rollback" = "$original" ]; then
+            reply 0 'RAT control interrupted; original mode restored'
+        else
+            reply 0 'RAT control interrupted and rollback failed; inspect modem state'
+        fi
+    else
+        reply 0 'RAT control interrupted before applying a change'
+    fi
+    exit 130
+}
+trap interrupted INT TERM
+/etc/init.d/air6-modem-manager stop >/dev/null 2>&1 && ifdown modem5g >/dev/null 2>&1 || { reply 0 'Cannot stop data worker'; exit 4; }
+waited=0
+while pidof mipc_wan_cli >/dev/null 2>&1; do
+    [ "$waited" -lt 20 ] || { reply 0 'Modem setup remains busy'; exit 75; }
+    sleep 1; waited=$((waited+1))
+done
+changed=1
+timeout 15 /usr/bin/mipc_wan_cli --nw_set_rat "$mode" >/tmp/air6-modem-rat-operation.log 2>&1
+rc=$?
+actual=$(get_rat)
+if [ "$rc" = 0 ] && [ "$actual" = "$mode" ]; then reply 1 'RAT applied and verified'; exit 0; fi
+timeout 15 /usr/bin/mipc_wan_cli --nw_set_rat "$original" >>/tmp/air6-modem-rat-operation.log 2>&1
+rollback=$(get_rat)
+if [ "$rollback" = "$original" ]; then reply 0 'RAT verification failed; original mode restored'; else reply 0 'RAT verification and rollback failed; inspect modem state'; fi
+exit 5

@@ -1,0 +1,93 @@
+#!/bin/sh
+# Query or change the AIR6 NR CA policy using only the known ESBP controls.
+set -u
+
+reply() {
+    jq -Mnc --arg status "$1" --arg message "$2" '{status:$status,message:$message}'
+}
+
+read_value() {
+    local response
+    response=$(timeout 9 /usr/bin/air6-modem-at "$1" 2>/dev/null) || return 1
+    printf '%s\n' "$response" | tr -d '\r' | awk '
+        /^\+ESBP:[[:blank:]]*[0-9]+[[:blank:]]*$/ { sub(/^\+ESBP:/, ""); value = $0 + 0; count++ }
+        /^OK[[:blank:]]*$/ { ok = 1 }
+        END { if (!ok || count != 1) exit 1; print value }
+    '
+}
+
+read_policy() {
+    enabled=$(read_value 'AT+ESBP=3,993') || return 1
+    case "$enabled" in 0|1) ;; *) return 1;; esac
+    dl_limit=$(read_value 'AT+ESBP=4,77') || return 1
+    fr1_limit=$(read_value 'AT+ESBP=4,171') || return 1
+    [ "$dl_limit" -ge 1 ] && [ "$dl_limit" -le 16 ] &&
+        [ "$fr1_limit" -ge 1 ] && [ "$fr1_limit" -le 16 ]
+}
+
+write_value() {
+    timeout 9 /usr/bin/air6-modem-at "AT+ESBP=$opcode,\"$key\",$1" >/dev/null 2>&1
+}
+
+op=${1:-}
+case "$op:$#" in get:1|on:1|off:1|2:1|3:1|4:1) ;; *) reply 0 'Invalid NR CA setting'; exit 2;; esac
+[ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = softbank,air6 ] ||
+    { reply 0 'NR CA control is available on AIR6 only'; exit 2; }
+exec 8>/var/lock/air6-modem-control.lock
+flock -n 8 || { reply 0 'Another modem operation is in progress'; exit 75; }
+if [ "$op" != get ]; then
+    [ "$(uci -q get qmodem.main.enable_dial)" != 1 ] ||
+        { reply 0 'QModem still owns modem controls'; exit 75; }
+    [ "$(uci -q get air6_modem.main.radio_off)" != 1 ] ||
+        { reply 0 'Enable the radio before changing NR CA'; exit 75; }
+fi
+read_policy || { reply 0 'Cannot read the modem NR CA policy'; exit 3; }
+
+if [ "$op" = get ]; then
+    jq -Mnc --argjson enabled "$enabled" --argjson dl "$dl_limit" --argjson fr1 "$fr1_limit" \
+        '{status:"1",enabled:($enabled==1),dl_limit:$dl,fr1_limit:$fr1,max_cc:([$dl,$fr1]|min)}'
+    exit 0
+fi
+
+case "$op" in
+    on|off)
+        opcode=5 key=SBP_NR_CA query='AT+ESBP=3,993' original=$enabled
+        desired=0
+        [ "$op" != on ] || desired=1
+        ;;
+    2|3|4)
+        [ "$enabled" = 1 ] || { reply 0 'Enable NR CA before selecting a limit'; exit 2; }
+        [ "$op" -le "$fr1_limit" ] || { reply 0 'Selected limit exceeds the modem FR1 policy'; exit 2; }
+        # Preserve the modem's FR1-specific cap and uplink policy.
+        opcode=6 key=SBP_NR_CA_MAX_CC_NUM query='AT+ESBP=4,77' original=$dl_limit desired=$op
+        ;;
+esac
+if [ "$original" = "$desired" ]; then
+    reply 1 'Requested NR CA setting is already applied'
+    exit 0
+fi
+
+restore() {
+    [ "$(read_value "$query")" = "$original" ] ||
+        { write_value "$original"; [ "$(read_value "$query")" = "$original" ]; }
+}
+interrupted() {
+    trap '' INT TERM
+    if restore; then
+        reply 0 'NR CA change interrupted; original setting restored'
+    else
+        reply 0 'NR CA change interrupted; could not verify the original setting'
+    fi
+    exit 130
+}
+trap interrupted INT TERM
+if write_value "$desired" && [ "$(read_value "$query")" = "$desired" ]; then
+    reply 1 'NR CA setting saved and verified'
+    exit 0
+fi
+if restore; then
+    reply 0 'NR CA change failed; original setting restored'
+else
+    reply 0 'NR CA change failed; could not verify the original setting'
+fi
+exit 5

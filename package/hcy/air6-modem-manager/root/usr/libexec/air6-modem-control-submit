@@ -1,0 +1,20 @@
+#!/bin/sh
+set -u
+[ "$(cat /tmp/sysinfo/board_name)" = softbank,air6 ] || exit 2
+case "${1:-}" in band|rat|radio|ca) ;; *) exit 2;; esac
+[ "$#" = 2 ] || exit 2
+# Serialize submit publication with the worker lock, so a completed worker
+# cannot race a second submit while its cleanup is still releasing state.
+exec 7>/var/lock/air6-modem-submit.lock
+flock -n 7 || { echo '{"status":"0","message":"Another submission is in progress"}'; exit 75; }
+[ "$(uci -q get qmodem.main.enable_dial)" != 1 ] || { echo '{"status":"0","message":"QModem still owns controls"}'; exit 75; }
+guard=/tmp/air6-modem-control-queued
+state=/tmp/air6-modem-control-job.json
+mkdir "$guard" 2>/dev/null || { echo '{"status":"0","message":"Another modem operation is pending"}'; exit 75; }
+umask 077
+printf '%s\n' '{"status":"pending","message":"Applying modem setting; waiting for readback"}' > "$state.new"
+mv "$state.new" "$state"
+/usr/libexec/air6-modem-control-job "$1" "$2" 7>&- </dev/null >/tmp/air6-modem-control-worker.log 2>&1 &
+worker=$!
+[ ! -d "$guard" ] || echo "$worker" > "$guard/pid"
+cat "$state"

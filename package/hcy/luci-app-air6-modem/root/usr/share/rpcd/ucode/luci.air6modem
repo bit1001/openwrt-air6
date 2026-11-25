@@ -1,22 +1,22 @@
 #!/usr/bin/env ucode
-/* Read-only RIL snapshot for cellular status; explicit control/SMS methods
- * retain their existing command paths. No status request performs modem I/O. */
+/* AIR6 native LuCI modem management.
+ * Original LuCI integration adapted from FiberHome LG6851F (Apache-2.0).
+ * Routine telemetry reads the bounded native RIL collector. AT is explicit only.
+ */
 'use strict';
 
-import { popen, readfile } from 'fs';
+import { popen, readfile, writefile } from 'fs';
+import { cursor } from 'uci';
 
 const CLI    = '/usr/bin/mipc_wan_cli';
 const ATCLI  = '/usr/bin/air6-modem-at';
 const SMSCLI = '/usr/bin/air6-modem-sms-send';
-const STATE  = '/tmp/air6-modem-status.json';
-const IFACE  = (function() {
-	let conf = readfile('/etc/config/network') || '';
-	return match(conf, /config interface 'modem5g'/) ? 'modem5g' : 'wan';
-})();
+const SNAPSHOT_MAX_AGE = 90;
+const IFACE  = 'modem5g';
 
 /* 本固件没有 fiberhome 的 board_name；有厂商 mipc_wan_cli 才说明是这颗集成模组。 */
 function board_ok() {
-	return readfile('/usr/bin/air6-nw-api') != null;
+	return readfile(CLI) != null;
 }
 
 function quote(value) {
@@ -59,10 +59,6 @@ function at(command) {
 	return capture([ ATCLI, command ], 18);
 }
 
-function uci_get(option) {
-	return capture([ '/sbin/uci', '-q', 'get', option ], 3).output;
-}
-
 function network_state() {
 	let result = capture([ '/bin/ubus', 'call', `network.interface.${IFACE}`, 'status' ], 5);
 	let state = null;
@@ -71,18 +67,39 @@ function network_state() {
 }
 
 function cached_modem_state() {
-    try { return json(readfile(STATE) || '{}'); } catch (e) { return {}; }
+    /* Coalesce requests in the background worker, without blocking rpcd. */
+    writefile('/var/run/air6-modem-status.request', '1');
+    try { return json(readfile('/tmp/air6-modem-status.json') || '{}'); }
+    catch (e) { return {}; }
+}
+
+function session_ambr(network, rat) {
+	let kind = rat == 'NR5G-SA' ? '5gs' : (rat == 'LTE' || rat == 'NR5G-NSA' ? 'eps' : null);
+	if (!kind || !network?.up || !network?.l3_device || network?.data?.cid == null)
+		return null;
+
+	let sample;
+	try { sample = json(readfile('/tmp/air6-modem-ambr.json') || '{}'); }
+	catch (e) { return null; }
+	if (!sample?.rates || sample.kind != kind ||
+	    sample.device != network.l3_device || ('' + sample.rates.cid) != ('' + network.data.cid))
+		return null;
+
+	let now = time();
+	let age = now - +(sample.updated || 0);
+	let delta = now - +(network.uptime || 0) - +(sample.connected_since || 0);
+	return age >= 0 && age <= 180 && delta >= -2 && delta <= 2 ? sample.rates : null;
 }
 
 function status() {
 	if (!board_ok())
-		return { available: false, error: 'Native modem API helper not found on this firmware' };
+		return { available: false, error: 'mipc_wan_cli not found on this firmware' };
 
 	let network_json = network_state();
 
 	let cached = cached_modem_state();
 	let age = time() - +(cached.UPDATED || 0);
-	if (!cached.UPDATED || age < -5 || age > 30)
+	if (!cached.UPDATED || age < 0 || age > SNAPSHOT_MAX_AGE)
 		return { available: true, initializing: true, network: network_json,
 			error: 'Waiting for the modem status collector' };
 
@@ -90,12 +107,11 @@ function status() {
 		available: true,
 		cached: true,
 		cache_age: age,
-		source: cached.source,
-		ca: cached.ca,
-		endc: cached.endc,
+		source: cached.source || "qlril-ubus",
+		api_errors: cached.api_errors || {},
 		carriers: cached.carriers || [],
-		measurements: cached.measurements || [],
-		api_errors: cached.api_errors,
+		ca: cached.ca || {},
+		session_ambr: session_ambr(network_json, cached.RAT),
 		imei: cached.IMEI || '',
 		imsi: cached.IMSI || '',
 		iccid: cached.ICCID || '',
@@ -112,7 +128,6 @@ function status() {
 		arfcn: cached.ARFCN || '',
 		tac: cached.TAC || '',
 		cellid: cached.CELLID || '',
-		apn: uci_get(`network.${IFACE}.apn`),
 		cesq: join(' · ', filter([
 			cached.RSSI ? `RSSI=${cached.RSSI} dBm` : null,
 			cached.RSRP ? `RSRP=${cached.RSRP} dBm` : null,
@@ -123,57 +138,92 @@ function status() {
 	};
 }
 
-/* 加速统计：HNAT 绑定计数来自 mt6990-hwnat 的 proc，接口计数来自 /proc/net/dev。 */
-function hnat_stats() {
-	let text = readfile('/proc/mt6990_lan_accel') || '';
-	let out = { available: text != '' };
-
-	for (let line in split(text, '\n')) {
-		let m = match(line, /^([a-z0-9_]+)\s+(-?\d+)$/);
-		if (m)
-			out[m[1]] = +m[2];
-	}
-	return out;
-}
-
-function interface_stats() {
-	let text = readfile('/proc/net/dev') || '';
-	let out = [];
-
-	for (let line in split(text, '\n')) {
-		let m = match(line, /^\s*([^:\s]+):\s*(.*)$/);
-		if (!m || !match(m[1], /^(eth\d+|br-lan|ccmni\d+|ra0|rai0|rax0)$/))
-			continue;
-
-		let v = split(trim(m[2]), /\s+/);
-		if (length(v) < 16)
-			continue;
-
-		push(out, {
-			name: m[1],
-			rx_bytes: +v[0], rx_packets: +v[1], rx_errors: +v[2], rx_dropped: +v[3],
-			tx_bytes: +v[8], tx_packets: +v[9], tx_errors: +v[10], tx_dropped: +v[11]
-		});
-	}
-	return out;
-}
-
 const methods = {
+    get_control: { call: function() {
+        try { return json(readfile('/tmp/air6-modem-control-job.json') || '{"status":"idle"}'); }
+        catch (e) { return {status:'0', message:'Cannot read control worker state'}; }
+    } },
+    get_ca: { call: function() {
+        let result = capture(['/usr/libexec/air6-modem-ca', 'get'], 35);
+        try { return json(result.output); } catch (e) { return {status:'0', message:'Cannot read NR CA settings'}; }
+    } },
+    set_ca: { args: { mode: '' }, call: function(req) {
+        let mode = req.args?.mode;
+        if (index(['on', 'off', '2', '3', '4'], mode) < 0)
+            return {status:'0', message:'Invalid NR CA setting'};
+        let result = capture(['/usr/libexec/air6-modem-control-submit', 'ca', mode], 5);
+        try { return json(result.output); } catch (e) { return {status:'0', message:'Cannot start NR CA change'}; }
+    } },
+    set_bands: { args: { band_class: '', bands: [] }, call: function(req) {
+        let a = req.args || {};
+        if (index(['LTE','NR'], a.band_class) < 0 || type(a.bands) != 'array' ||
+            !length(a.bands) || length(a.bands) > 256 ||
+            length(filter(a.bands, b => type(b) != 'int' || b < 1 || b > 1024)))
+            return {code:22, error:'Invalid band selection'};
+        let spec = sprintf('%J', {band_class:a.band_class,lock_band:join(',',a.bands)});
+        let result = capture(['/usr/libexec/air6-modem-control-submit','band',spec],5);
+        try { return json(result.output); } catch(e) { return {code:result.code || 5,error:result.output}; }
+    } },
+    get_apn: { call: function() {
+        let uci = cursor();
+        return { automatic: uci.get('network', IFACE, 'auto_conf') == '1',
+            apn: uci.get('network', IFACE, 'apn') || '',
+            username: uci.get('network', IFACE, 'username') || '',
+            password_set: length(uci.get('network', IFACE, 'password') || '') > 0,
+            auth: +(uci.get('network', IFACE, 'auth') || 0),
+            iptype: +(uci.get('network', IFACE, 'iptype') || 3) };
+    } },
+    save_apn: { args: { automatic: true, apn: '', username: '', password: '',
+        replace_password: false, auth: 0, iptype: 3 }, call: function(req) {
+        let a = req.args || {};
+        let uci = cursor();
+        if (uci.get('qmodem', 'main', 'enable_dial') == '1')
+            return { code: 75, error: 'QModem still owns connection settings' };
+        if (uci.get('network', IFACE, 'proto') != 'ql_datacall')
+            return { code: 22, error: 'Unexpected cellular interface protocol' };
+        let apn = '' + (a.apn || '');
+        let user = '' + (a.username || '');
+        let password = '' + (a.password || '');
+        if ((!a.automatic && !match(apn, /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/)) ||
+            length(user) > 128 || length(password) > 128 ||
+            !match(user, /^[ -~]*$/) || !match(password, /^[ -~]*$/) ||
+            index([0, 1, 2], +a.auth) < 0 || index([1, 2, 3], +a.iptype) < 0)
+            return { code: 22, error: 'Invalid APN settings' };
+        uci.set('network', IFACE, 'auto_conf', a.automatic ? '1' : '0');
+        if (!a.automatic) {
+            uci.set('network', IFACE, 'apn', apn);
+            uci.set('network', IFACE, 'username', user);
+            if (a.replace_password) uci.set('network', IFACE, 'password', password);
+            uci.set('network', IFACE, 'auth', '' + a.auth);
+            uci.set('network', IFACE, 'iptype', '' + a.iptype);
+        } else {
+            /* Automatic SIM provisioning must not inherit a previous carrier's APN/PLMN. */
+            uci.delete('network', IFACE, 'apn');
+            uci.delete('network', IFACE, 'plmn');
+        }
+        if (!uci.commit('network')) return { code: 5, error: 'Cannot save network settings' };
+        return { code: 0, output: 'APN settings saved; reconnect to apply' };
+    } },
+    get_bands: { call: function() {
+        let result = capture([ '/usr/bin/air6-nw-api', '--bands' ], 20);
+        let data;
+        try { data = json(result.output); } catch (e) {}
+        if (result.code != 0 || type(data) != 'object')
+            return { error: 'Native band query failed', code: result.code || 5 };
+        return data;
+    } },
 	get_status: { call: function() { return status(); } },
 
-	get_accel_stats: { call: function() {
-		return { hnat: hnat_stats(), interfaces: interface_stats(), ts: time() };
-	} },
-
-	get_cells: { call: function() {
+    /* Read the same native RIL cache as status; never poll AT for cells. */
+    get_cells: { call: function() {
         let cached = cached_modem_state();
         let age = time() - +(cached.UPDATED || 0);
-        if (!cached.UPDATED || age < -5 || age > 30)
-            return { initializing: true, stale: true, cache_age: age, cells: [], carriers: [], measurements: [] };
-        return { source: cached.source, cache_age: age, stale: false,
+        return { source: 'qlril-ubus', stale: !cached.UPDATED || age < 0 || age > SNAPSHOT_MAX_AGE,
+            cache_age: cached.UPDATED && age >= 0 ? age : null,
             cells: cached.cells || [], carriers: cached.carriers || [],
-            measurements: cached.measurements || [], ca: cached.ca,
-            endc: cached.endc, api_errors: cached.api_errors };
+            ca: cached.ca || {}, api_errors: cached.api_errors || {},
+            serving: { output: '' }, engineering: { output: '' },
+            note: 'Native RIL API measurements; no AT polling' };
     } },
 
 	list_sms: { call: function() {
@@ -224,28 +274,27 @@ const methods = {
 	get_network: { call: function() {
 		let state = capture([ '/bin/ubus', 'call', `network.interface.${IFACE}`, 'status' ], 5);
 		let config = capture([ '/sbin/uci', '-q', 'show', `network.${IFACE}` ], 5);
+        config.output = join('\n', map(split(config.output, '\n'), line =>
+            match(line, /\.(password|pincode)=/) ? replace(line, /=.*/, "='[hidden]'") : line));
 		let cached = cached_modem_state();
-		return { interface: IFACE, status: state.output, config: config.output,
-			radio: cached.RADIO || '', rat: cached.RAT_RAW || cached.RAT || 'UNKNOWN', cached: true,
-			apn: uci_get(`network.${IFACE}.apn`),
-			plmn: uci_get(`network.${IFACE}.plmn`),
-			iptype: uci_get(`network.${IFACE}.iptype`),
-			auth: uci_get(`network.${IFACE}.auth`),
-			mtu: uci_get(`network.${IFACE}.mtu`) };
+		return { status: state.output, config: config.output,
+			radio: cached.RADIO || '', rat: cached.RAT_RAW || cached.RAT || 'UNKNOWN', cached: true };
 	} },
 
 	set_radio: { args: { enabled: true }, call: function(req) {
-		return cli('nw_radio_state_set', req.args?.enabled ? '1' : '0');
+		let result = capture(['/usr/libexec/air6-modem-control-submit', 'radio', req.args?.enabled ? '1' : '0'], 5);
+        try { return json(result.output); } catch(e) { return {code:result.code || 5,error:result.output}; }
 	} },
 
-	set_rat: { args: { mode: 21 }, call: function(req) {
-		let mode = +req.args?.mode;
-		if (index([ 3, 15, 19, 21 ], mode) < 0) return { code: 22, error: 'Invalid RAT mode' };
-		return cli('nw_set_rat', mode);
-	} },
+    set_rat: { args: { mode: 21 }, call: function(req) {
+        let mode = +req.args?.mode;
+        if (index([3,15,19,21], mode) < 0) return {code:22,error:'Invalid RAT mode'};
+        let result = capture(['/usr/libexec/air6-modem-control-submit','rat',''+mode],5);
+        try { return json(result.output); } catch(e) { return {code:result.code || 5,error:result.output}; }
+    } },
 
-	ifup: { call: function() { return capture([ '/sbin/ifup', IFACE ], 25); } },
-	ifdown: { call: function() { return capture([ '/sbin/ifdown', IFACE ], 25); } }
+	ifup: { call: function() { return capture([ '/etc/init.d/air6-modem-manager', 'dial' ], 25); } },
+	ifdown: { call: function() { return capture([ '/etc/init.d/air6-modem-manager', 'hang' ], 25); } }
 };
 
 return { 'luci.air6modem': methods };

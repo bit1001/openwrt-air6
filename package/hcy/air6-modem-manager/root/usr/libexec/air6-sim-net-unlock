@@ -1,0 +1,76 @@
+#!/bin/sh
+# One bounded unlock sequence per boot, only after an explicit network-lock response.
+[ "$(cat /tmp/sysinfo/board_name)" = softbank,air6 ] || exit 2
+[ "$(uci -q get air6_modem.main.radio_off)" != 1 ] || exit 75
+umask 077
+STATE=/tmp/air6-sim-net-unlock.state
+ATTEMPT=/tmp/air6-sim-net-unlock.attempted
+exec 8>/var/lock/air6-sim-net-unlock.lock
+flock -n 8 || exit 0
+status() { printf '%s\n' "$1" > "$STATE"; logger -t air6-sim-net-unlock "$1"; }
+# Called by the serialized netifd setup owner before APN/SIM provisioning.
+# All replies are normalized because the vendor AT channel returns CRLF.
+at() { timeout 10 /usr/bin/mipc_wan_cli --at_cmd "$1" | tr -d '\r'; }
+# Ensure SA and NSA are enabled independently of SIM readiness.
+configure_5g() {
+ mode_state=/tmp/air6-5gopt.state
+ for mode_wait in $(seq 1 36); do
+  mode_reply=$(at 'AT+E5GOPT?' 2>/dev/null) || mode_reply=
+  if printf '%s\n' "$mode_reply" | grep -qE '^\+E5GOPT:[[:space:]]*[1357][[:space:]]*$'; then
+   if ! printf '%s\n' "$mode_reply" | grep -qE '^\+E5GOPT:[[:space:]]*7[[:space:]]*$'; then
+    mode_result=$(at 'AT+E5GOPT=7' 2>/dev/null) || mode_result=
+    if ! printf '%s\n' "$mode_result" | grep -qE '^OK[[:space:]]*$'; then
+     echo SET_FAILED > "$mode_state"; logger -t air6-sim-net-unlock E5GOPT_SET_FAILED; return 1
+    fi
+   fi
+   mode_reply=$(at 'AT+E5GOPT?' 2>/dev/null) || mode_reply=
+   if printf '%s\n' "$mode_reply" | grep -qE '^\+E5GOPT:[[:space:]]*7[[:space:]]*$'; then
+    echo SA_NSA_ENABLED_VERIFIED > "$mode_state"
+    logger -t air6-sim-net-unlock SA_NSA_ENABLED_VERIFIED; return 0
+   fi
+   echo VERIFY_FAILED > "$mode_state"; return 1
+  fi
+  sleep 5
+ done
+ echo QUERY_TIMEOUT > "$mode_state"; return 1
+}
+configure_5g || exit 1
+if [ -e "$ATTEMPT" ]; then
+ reply=$(at 'AT+CPIN?' 2>/dev/null) || reply=
+ printf '%s\n' "$reply" | grep -q '+CPIN: READY' && exit 0
+ status ALREADY_ATTEMPTED_SIM_NOT_READY
+ exit 1
+fi
+for n in $(seq 1 36); do
+ reply=$(at 'AT+CPIN?' 2>/dev/null) || reply=
+ if printf '%s\n' "$reply" | grep -q '+CPIN: READY'; then
+  status SIM_READY_NO_UNLOCK_REQUIRED
+  exit 0
+ fi
+ if printf '%s\n' "$reply" | grep -qE '\+CPIN: PH-(NET|NETSUB|SP|CORP) (PIN|PUK)'; then
+  # Only PH-NET PIN is covered by the operator-provided sequence.
+  printf '%s\n' "$reply" | grep -q '+CPIN: PH-NET PIN' || { status UNSUPPORTED_LOCK_NO_ATTEMPT; exit 1; }
+  touch "$ATTEMPT"
+  status NETWORK_LOCK_DETECTED
+  result=$(at 'AT+ESMLCK=0,0,"50603202"' 2>/dev/null) || result=
+  printf '%s\n' "$result" | grep -qE '^OK[[:space:]]*$' || { status FIRST_COMMAND_FAILED_NO_RETRY; exit 1; }
+  result=$(at 'AT+ESMLCK=2,0,"50603202"' 2>/dev/null) || result=
+  printf '%s\n' "$result" | grep -qE '^OK[[:space:]]*$' || { status SECOND_COMMAND_FAILED_NO_RETRY; exit 1; }
+  # CPIN can retain the initial lock result until the SIM is powered down.
+  result=$(at 'AT+CFUN=0' 2>/dev/null) || result=
+  printf '%s\n' "$result" | grep -qE '^OK[[:space:]]*$' || { status SIM_RESET_FAILED; exit 1; }
+  sleep 15
+  result=$(at 'AT+CFUN=1' 2>/dev/null) || result=
+  printf '%s\n' "$result" | grep -qE '^OK[[:space:]]*$' || { status RADIO_RESTORE_FAILED; exit 1; }
+  for check in $(seq 1 12); do
+   sleep 5
+   reply=$(at 'AT+CPIN?' 2>/dev/null) || reply=
+   if printf '%s\n' "$reply" | grep -q '+CPIN: READY'; then status UNLOCKED_SIM_READY; exit 0; fi
+  done
+  status COMMANDS_ACCEPTED_SIM_NOT_READY
+  exit 1
+ fi
+ sleep 5
+done
+status WAIT_TIMEOUT_NO_ATTEMPT
+exit 1

@@ -1,0 +1,21 @@
+{
+  "luci-app-air6-slot": {
+    "description": "Manage AIR6 boot slots",
+    "read": {
+      "ubus": {
+        "luci.air6slot": [
+          "status"
+        ]
+      }
+    },
+    "write": {
+      "ubus": {
+        "luci.air6slot": [
+          "auto",
+          "other",
+          "disable"
+        ]
+      }
+    }
+  }
+}

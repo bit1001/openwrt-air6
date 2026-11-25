@@ -1,0 +1,19 @@
+#!/bin/sh
+# One-time AIR6 ownership migration; preserve network/APN and manual stop.
+[ "$(cat /tmp/sysinfo/board_name)" = softbank,air6 ] || exit 0
+[ -x /etc/init.d/air6-modem-manager ] || exit 1
+# Retained QModem config may still request dialing after its package is removed.
+if uci -q get qmodem.main >/dev/null; then
+    uci set qmodem.main.enable_dial=0
+    uci commit qmodem || exit 1
+fi
+for service in qmodem_network qmodem-settings qmodem_init qmodem_led qmodem_reboot qmodem_usage_stats; do
+    [ ! -x "/etc/init.d/$service" ] || {
+        "/etc/init.d/$service" stop >/dev/null 2>&1
+        "/etc/init.d/$service" disable >/dev/null 2>&1
+    }
+done
+/etc/init.d/air6-radio-intent enable
+/etc/init.d/air6-modem-status enable
+/etc/init.d/air6-modem-manager enable
+exit 0

@@ -1,7 +1,6 @@
 'use strict';
 'require baseclass';
 'require ui';
-'require air6modem.i18n as i18n';
 
 /* Air6 5G 模组页面的公共样式与小工具。
  * 视觉参考 MT5700 一类现代 CPE 面板：大圆环信号表 + 指标磁贴 + 卡片网格。
@@ -120,8 +119,6 @@ function num(value) {
 	return Number.isFinite(n) ? n : null;
 }
 
-i18n.install();
-
 return baseclass.extend({
 	style() { return E('style', {}, CSS_LAYOUT + CSS_COMPONENTS); },
 	/* 旧页面还在调用 extraStyle()，保留空实现避免报错。 */
@@ -179,16 +176,22 @@ return baseclass.extend({
 		return E('dl', { 'class': 'a6-kv' }, body);
 	},
 
-	/* 运营商代码 -> 友好名称（覆盖常见的国内/日本段） */
-	operatorName(code) {
+	/* 模组可能上报 PLMN 编号，也可能上报运营商名称。 */
+	operatorName(value) {
 		const map = {
+			'CHINA MOBILE': '中国移动', 'CMCC': '中国移动',
+			'CHINA UNICOM': '中国联通', 'CUCC': '中国联通',
+			'CHINA TELECOM': '中国电信', 'CTCC': '中国电信', 'CHN-CT': '中国电信',
+			'CHINA BROADNET': '中国广电', 'CBN': '中国广电',
+			'MI MOBILE': '小米移动', 'XIAOMI MOBILE': '小米移动', '小米移动': '小米移动',
 			'46000': '中国移动', '46002': '中国移动', '46004': '中国移动', '46007': '中国移动', '46008': '中国移动',
 			'46001': '中国联通', '46006': '中国联通', '46009': '中国联通',
 			'46003': '中国电信', '46005': '中国电信', '46011': '中国电信',
 			'46015': '中国广电', '46020': '中国铁通',
 			'44010': 'NTT docomo', '44020': 'SoftBank', '44011': 'Rakuten', '44100': '日本测试网'
 		};
-		return map[String(code || '')] || '';
+		const key = String(value ?? '').trim().replace(/\s+/g, ' ').toUpperCase();
+		return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : '';
 	},
 	/* 采集器里的英文状态串 -> 中文 */
 	registrationText(value) {

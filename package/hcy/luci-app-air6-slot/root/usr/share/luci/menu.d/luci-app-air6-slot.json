@@ -1,0 +1,15 @@
+{
+  "admin/system/air6-slot": {
+    "title": "切槽管理",
+    "order": 85,
+    "action": {
+      "type": "view",
+      "path": "system/air6-slot"
+    },
+    "depends": {
+      "acl": [
+        "luci-app-air6-slot"
+      ]
+    }
+  }
+}

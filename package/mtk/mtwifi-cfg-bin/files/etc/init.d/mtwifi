@@ -14,19 +14,20 @@ STOP=20
 USE_PROCD=1
 
 start_service() {
-	# A fresh image has profiles but no UCI wireless file yet.
+	# A fresh image has profiles but no UCI wireless file yet. Only detect
+	# on first boot; service restarts must preserve the user's settings.
 	[ -s /etc/wireless/l1profile.dat ] || return 0
+	if [ ! -s /etc/config/wireless ]; then
+		/usr/sbin/mtwifi detect /etc/config/wireless || return 1
+	fi
 
-	# The daemon writes hostapd configs here and expects the directory to
-	# exist; /var/run is a tmpfs that starts empty on every boot.
+	# The vendor hostapd is driven through a global control socket, and the
+	# per-interface configs are written into the same directory with mkstemp,
+	# which fails with ENOENT if it is missing.
 	mkdir -p /var/run/hostapd
-
-	# Regenerate only when the config is missing or has lost its interfaces
-	# (e.g. a reset left wifi-device sections behind without wifi-iface).
-	# A config with interfaces is preserved so user edits survive restarts.
-	if ! grep -q '^config wifi-iface' /etc/config/wireless 2>/dev/null; then
-		/usr/sbin/mtwifi detect /tmp/wireless.detect || return 1
-		mv -f /tmp/wireless.detect /etc/config/wireless
+	chmod 770 /var/run/hostapd
+	if [ ! -S /var/run/hostapd/global ]; then
+		/usr/sbin/hostapd -B -P /var/run/hostapd/hostapd-global.pid 			-g /var/run/hostapd/global >/tmp/hostapd-global.log 2>&1
 	fi
 
 	procd_open_instance
@@ -35,4 +36,10 @@ start_service() {
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
+}
+
+stop_service() {
+	[ -f /var/run/hostapd/hostapd-global.pid ] &&
+		{ read pid < /var/run/hostapd/hostapd-global.pid; kill "$pid" 2>/dev/null; }
+	return 0
 }

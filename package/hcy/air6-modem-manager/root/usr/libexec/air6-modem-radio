@@ -1,0 +1,64 @@
+#!/bin/sh
+# Serialized RF intent transaction; keep manual data-stop independent.
+set -u
+value=${1:-}
+restore_intent=${2:-}
+case "$restore_intent" in ""|restore) ;; *) exit 2;; esac
+reply() { jq -nc --arg status "$1" --arg message "$2" '{status:$status,message:$message}'; }
+case "$value" in 0|1) ;; *) reply 0 'Invalid radio state'; exit 2;; esac
+[ "$(cat /tmp/sysinfo/board_name)" = softbank,air6 ] || exit 2
+[ "$(uci -q get qmodem.main.enable_dial)" != 1 ] || { reply 0 'QModem still owns controls'; exit 75; }
+exec 8>/var/lock/air6-modem-control.lock
+flock -n 8 || { reply 0 'Another modem control is running'; exit 75; }
+# Boot restoration may have waited behind an explicit radio-on transaction.
+if [ "$restore_intent" = restore ] && [ "$(uci -q get air6_modem.main.radio_off || true)" != 1 ]; then
+    reply 1 'Radio-off intent was cleared; no restoration needed'
+    exit 0
+fi
+get_radio() {
+    raw=$(timeout 8 /usr/bin/mipc_wan_cli --nw_radio_state_get 0 2>/dev/null) || return 1
+    case "$raw" in *MIPC_NW_RADIO_STATE_ON*) echo 1;; *MIPC_NW_RADIO_STATE_OFF*) echo 0;; *) return 1;; esac
+}
+pidof mipc_wan_cli >/dev/null 2>&1 && { reply 0 'Modem setup is busy'; exit 75; }
+original=$(get_radio) || { reply 0 'Cannot read original radio state'; exit 3; }
+intent=$(uci -q get air6_modem.main.radio_off || true)
+was_running=false
+if [ "$(uci -q get air6_modem.main.enabled)" = 1 ] && [ "$(uci -q get air6_modem.main.manual_stop)" != 1 ]; then was_running=true; fi
+changed=0
+success=0
+restore() {
+    trap '' INT TERM
+    if [ "$success" = 0 ] && [ "$changed" = 1 ]; then
+        timeout 15 /usr/bin/mipc_wan_cli --nw_radio_state_set "$original" >/tmp/air6-modem-radio-rollback.log 2>&1
+        if [ "$(get_radio || true)" != "$original" ]; then
+            # Keep data blocked when original RF state cannot be recovered.
+            uci set air6_modem.main.radio_off=1
+            uci commit air6_modem
+            reply 0 'Radio rollback failed; data remains blocked; inspect modem state'
+            return
+        fi
+        if [ -n "$intent" ]; then uci set air6_modem.main.radio_off="$intent"; else uci -q delete air6_modem.main.radio_off || true; fi
+        uci commit air6_modem
+    fi
+    if [ "$(uci -q get air6_modem.main.radio_off || true)" != 1 ] && [ "$was_running" = true ]; then
+        /etc/init.d/air6-modem-manager start >/dev/null 2>&1
+    fi
+}
+trap restore EXIT
+trap 'trap "" INT TERM; exit 130' INT TERM
+/etc/init.d/air6-modem-manager stop >/dev/null 2>&1 && ifdown modem5g >/dev/null 2>&1 || { reply 0 'Cannot stop data worker'; exit 4; }
+waited=0
+while pidof mipc_wan_cli >/dev/null 2>&1; do
+    [ "$waited" -lt 20 ] || { reply 0 'Modem setup remains busy'; exit 75; }
+    sleep 1; waited=$((waited+1))
+done
+changed=1
+# Persist the blocking intent before touching RF so boot/setup cannot undo off.
+uci set air6_modem.main.radio_off=1 && uci commit air6_modem || { reply 0 'Cannot persist radio intent'; exit 4; }
+timeout 15 /usr/bin/mipc_wan_cli --nw_radio_state_set "$value" >/tmp/air6-modem-radio-operation.log 2>&1
+rc=$?
+actual=$(get_radio || true)
+[ "$rc" = 0 ] && [ "$actual" = "$value" ] || { reply 0 'Radio verification failed; restoring original state'; exit 5; }
+uci set air6_modem.main.radio_off="$((1-value))" && uci commit air6_modem || { reply 0 'Cannot commit verified radio intent'; exit 4; }
+success=1
+reply 1 'Radio state applied and verified; manual data-stop preserved'

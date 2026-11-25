@@ -1,25 +1,60 @@
 #!/bin/sh
-# Install this unit's factory Wi-Fi calibration (usr_factory block: e2p=<block>,<size>).
+# Select the factory MT7990 EEPROM before loading the Wi-Fi modules.
+. /lib/functions/system.sh
+set -e
+
 dst=/etc/air6-vendor618/firmware
+fallback=/etc/air6-wifi/factory-e2p.bin
+template=/etc/wireless/mediatek/e2p
 mkdir -p "$dst"
+tmp=$(mktemp "$dst/.e2p.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
 
-raw=""
-. /lib/functions/system.sh 2>/dev/null
-raw=$(find_mmc_part raw1 2>/dev/null)
-[ -b "$raw" ] || raw=/dev/mmcblk0p40
+valid_e2p() {
+	[ -f "$1" ] &&
+	[ "$(wc -c < "$1")" -eq 7680 ] &&
+	[ "$(hexdump -v -n 2 -e '2/1 "%02x"' "$1")" = 9079 ] &&
+	[ -n "$(dd if="$1" bs=256 skip=1 2>/dev/null | tr -d '\000\377' | head -c 1 | hexdump -v -e '1/1 "%02x"')" ]
+}
 
-blk=$(dd if="$raw" bs=4096 count=1 2>/dev/null | tr -d '\000' | sed -n 's/^e2p=\([0-9][0-9]*\),.*/\1/p' | head -1)
-size=$(dd if="$raw" bs=4096 count=1 2>/dev/null | tr -d '\000' | sed -n 's/^e2p=[0-9][0-9]*,\([0-9][0-9]*\).*/\1/p' | head -1)
+read_raw_e2p() {
+	local part metadata entry block
+	part=$(find_mmc_part "$1") || return 1
+	[ -b "$part" ] || return 1
 
-if [ -n "$blk" ] && [ -n "$size" ] && [ "$size" -gt 1024 ] && [ "$size" -le 1048576 ]; then
-	off=$((blk * 262144))
-	dd if="$raw" of="$dst/e2p.new" bs=1 skip="$off" count="$size" 2>/dev/null
-	if [ -s "$dst/e2p.new" ]; then
-		mv "$dst/e2p.new" "$dst/e2p"
-	fi
+	# The factory metadata may have a second copy one 256 KiB block later.
+	for metadata in 0 64; do
+		entry=$(dd if="$part" bs=4096 skip="$metadata" count=1 2>/dev/null |
+			tr -d '\000\r' | sed -n 's/^e2p=\([1-7]\),7680$/\1/p' | head -n 1)
+		case "$entry" in
+			[1-7]) block=$entry ;;
+			*) continue ;;
+		esac
+		if dd if="$part" of="$tmp" bs=256 skip="$((block * 1024))" count=30 2>/dev/null &&
+			valid_e2p "$tmp"; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+if read_raw_e2p raw1; then
+	source=raw1
+elif read_raw_e2p raw2; then
+	source=raw2
+elif valid_e2p "$fallback"; then
+	cp "$fallback" "$tmp"
+	source=local-backup
+elif valid_e2p "$template"; then
+	cp "$template" "$tmp"
+	source=default-template
+else
+	echo 'AIR6: no valid MT7990 Wi-Fi EEPROM' >&2
+	exit 1
 fi
 
-if [ ! -s "$dst/e2p" ]; then
-	cp /etc/wireless/mediatek/e2p "$dst/e2p"
+if ! cmp -s "$tmp" "$dst/e2p"; then
+	chmod 0644 "$tmp"
+	mv -f "$tmp" "$dst/e2p"
 fi
-chmod 0644 "$dst/e2p"
+echo "AIR6: loaded Wi-Fi calibration from $source"

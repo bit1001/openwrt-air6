@@ -1,2 +1,6 @@
-# AIR6/MT6990 exclusive signed feeds.
-# Linux 6.18; aarch64_cortex-a55_neon-vfpv4.
+# AIR6 local packages remain signed by the MT6990 key.
+https://downloads.openwrt.org/snapshots/packages/aarch64_generic/base/packages.adb
+https://downloads.openwrt.org/snapshots/packages/aarch64_generic/luci/packages.adb
+https://downloads.openwrt.org/snapshots/packages/aarch64_generic/packages/packages.adb
+https://downloads.openwrt.org/snapshots/packages/aarch64_generic/routing/packages.adb
+https://downloads.openwrt.org/snapshots/packages/aarch64_generic/telephony/packages.adb

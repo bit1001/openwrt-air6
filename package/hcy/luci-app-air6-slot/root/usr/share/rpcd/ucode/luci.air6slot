@@ -1,0 +1,25 @@
+'use strict';
+import { popen } from 'fs';
+
+function manage(action) {
+    let pipe = popen('/usr/libexec/air6-slot-manage ' + action + ' 2>/dev/null', 'r');
+    if (!pipe) return { ok: false };
+    let body = pipe.read('all');
+    if (pipe.close() != 0) return { ok: false };
+
+    try {
+        let result = json(body);
+        return { ...result, ok: true };
+    } catch (e) {
+        return { ok: false };
+    }
+}
+
+return {
+    'luci.air6slot': {
+        status: { call: () => manage('status') },
+        auto: { call: () => manage('auto') },
+        other: { call: () => manage('other') },
+        disable: { call: () => manage('disable') }
+    }
+};

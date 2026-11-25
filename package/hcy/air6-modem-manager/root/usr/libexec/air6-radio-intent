@@ -1,0 +1,12 @@
+#!/bin/sh
+# Bounded boot recovery. A failed attempt never clears persistent RF-off intent.
+umask 077
+attempt=0
+while [ "$attempt" -lt 18 ]; do
+    [ "$(uci -q get air6_modem.main.radio_off)" = 1 ] || exit 0
+    /usr/libexec/air6-modem-radio 0 restore > /tmp/air6-radio-intent-result.json 2>&1 && exit 0
+    attempt=$((attempt+1))
+    sleep 10
+done
+logger -t air6-radio-intent 'RF-off restoration did not verify; data remains blocked; inspect radio state'
+exit 1
