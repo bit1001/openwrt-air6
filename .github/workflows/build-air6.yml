@@ -47,7 +47,7 @@ jobs:
             build-essential clang flex bison g++ gawk gcc-multilib \
             gettext git libncurses-dev libssl-dev python3 python3-setuptools \
             rsync unzip zlib1g-dev file wget curl libelf-dev zstd \
-            squashfs-tools swig xsltproc time
+            squashfs-tools swig xsltproc time dwarves llvm
 
       - name: Configure pinned feeds
         run: |
@@ -83,6 +83,36 @@ jobs:
             make -j1 V=s 2>&1 | tee build.log
           else
             make -j"$(nproc)" 2>&1 | tee build.log || make -j1 V=s 2>&1 | tee -a build.log
+          fi
+
+      - name: Extract detached kernel BTF and inject into rootfs
+        if: success()
+        run: |
+          set -e
+          VMLINUX=$(find build_dir/target-aarch64_generic_musl/linux-mediatek_mt6990 -name vmlinux | head -n1)
+          if [ -n "$VMLINUX" ] && [ -f "$VMLINUX" ]; then
+            echo "Found vmlinux: $VMLINUX"
+            echo "Generating detached BTF using pahole..."
+            pahole -J "$VMLINUX"
+            OBJCOPY_BIN=$(which llvm-objcopy || which objcopy)
+            "$OBJCOPY_BIN" --only-section=.BTF --set-section-flags .BTF=alloc,readonly -O binary "$VMLINUX" bin/targets/mediatek/mt6990/vmlinux.btf
+            ls -lh bin/targets/mediatek/mt6990/vmlinux.btf
+
+            ROOTFS="bin/targets/mediatek/mt6990/rootfs.img"
+            if [ -f "$ROOTFS" ] && [ -f bin/targets/mediatek/mt6990/vmlinux.btf ]; then
+              echo "Injecting vmlinux.btf into rootfs.img..."
+              TMP_SQFS=$(mktemp -d)
+              unsquashfs -d "$TMP_SQFS/rootfs" "$ROOTFS"
+              mkdir -p "$TMP_SQFS/rootfs/usr/lib/debug/boot" "$TMP_SQFS/rootfs/etc/dae"
+              cp bin/targets/mediatek/mt6990/vmlinux.btf "$TMP_SQFS/rootfs/usr/lib/debug/boot/vmlinux"
+              cp bin/targets/mediatek/mt6990/vmlinux.btf "$TMP_SQFS/rootfs/etc/dae/vmlinux.btf"
+              mksquashfs "$TMP_SQFS/rootfs" "$ROOTFS" -noappend -b 256k -comp xz
+              rm -rf "$TMP_SQFS"
+              echo "Repacked rootfs.img with injected vmlinux.btf:"
+              ls -lh "$ROOTFS"
+            fi
+          else
+            echo "Warning: vmlinux not found, skipping detached BTF extraction."
           fi
 
       - name: Package sysupgrade tar bundle
