@@ -1,0 +1,58 @@
+#!/bin/sh
+# Air6 5G Modem Keepalive Daemon
+# Periodically probes cellular data path with small packets to keep RRC active under low load.
+# Automatically reconnects if link stalls.
+
+TAG="air6-keepalive"
+INTERVAL=15
+FAIL_LIMIT=3
+TARGET1="223.5.5.5"
+TARGET2="119.29.29.29"
+
+log() {
+    logger -t "$TAG" "$*"
+}
+
+get_modem_device() {
+    ubus call network.interface.modem5g status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null
+}
+
+is_modem_up() {
+    [ "$(ubus call network.interface.modem5g status 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = "true" ]
+}
+
+failures=0
+
+while true; do
+    sleep "$INTERVAL"
+
+    if ! is_modem_up; then
+        failures=0
+        continue
+    fi
+
+    dev="$(get_modem_device)"
+    [ -n "$dev" ] || continue
+
+    # Probe with minimal 16-byte payload to keep radio and PDP context active
+    if ping -I "$dev" -c 1 -W 2 -s 16 "$TARGET1" >/dev/null 2>&1 || \
+       ping -I "$dev" -c 1 -W 2 -s 16 "$TARGET2" >/dev/null 2>&1; then
+        if [ "$failures" -gt 0 ]; then
+            log "Modem data path active on $dev"
+            failures=0
+        fi
+        continue
+    fi
+
+    failures=$((failures + 1))
+    log "Keepalive probe failed on $dev ($failures/$FAIL_LIMIT)"
+
+    if [ "$failures" -ge "$FAIL_LIMIT" ]; then
+        log "Modem link inactive or stalled; restarting modem5g interface..."
+        failures=0
+        ifdown modem5g
+        sleep 3
+        ifup modem5g
+        sleep 10
+    fi
+done

@@ -122,8 +122,7 @@ define Package/$(PKG_NAME)/postinst
 [ -n "$${IPKG_INSTROOT}" ] || {
 	[ ! -x /etc/init.d/air6-ca-daemon ] || { /etc/init.d/air6-ca-daemon stop; /etc/init.d/air6-ca-daemon disable; } >/dev/null 2>&1
 	/etc/init.d/rpcd restart >/dev/null 2>&1
-	/etc/init.d/air6-modem-status enable >/dev/null 2>&1
-	/etc/init.d/air6-modem-status restart >/dev/null 2>&1
+	[ ! -x /etc/init.d/air6-modem-status ] || /etc/init.d/air6-modem-status stop >/dev/null 2>&1
 	[ ! -x /etc/init.d/uhttpd ] || /etc/init.d/uhttpd restart >/dev/null 2>&1
 	rm -f /tmp/luci-indexcache
 	rm -rf /tmp/luci-modulecache
