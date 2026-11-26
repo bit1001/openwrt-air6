@@ -42,6 +42,20 @@
 		};
 	};
 
+	cpu_dvfs_divider: cpu-divider@c530000 {
+		reg = <0 0x0c530000 0 0x10000>;
+	};
+
+	performance: performance-controller@11bc10 {
+		compatible = "mediatek,cpufreq-hw";
+		reg = <0 0x0011bc10 0 0x120>;
+		#performance-domain-cells = <1>;
+		mediatek,cpu-pll = <&apmixedsys>;
+		mediatek,cpu-divider = <&cpu_dvfs_divider>;
+		mediatek,pll-offset = <0x2f4>;
+		mediatek,divider-offset = <0xa2a0>;
+	};
+
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -52,6 +66,7 @@
 			device_type = "cpu";
 			enable-method = "psci";
 			clock-frequency = <1701000000>;
+			performance-domains = <&performance 0>;
 			cpu-idle-states = <&cpu_off_l>, <&cluster_off_l>, <&mcusys_off>;
 			#cooling-cells = <2>;
 		};
@@ -62,6 +77,7 @@
 			device_type = "cpu";
 			enable-method = "psci";
 			clock-frequency = <1701000000>;
+			performance-domains = <&performance 0>;
 			cpu-idle-states = <&cpu_off_l>, <&cluster_off_l>, <&mcusys_off>;
 			#cooling-cells = <2>;
 		};
@@ -72,6 +88,7 @@
 			device_type = "cpu";
 			enable-method = "psci";
 			clock-frequency = <1701000000>;
+			performance-domains = <&performance 0>;
 			cpu-idle-states = <&cpu_off_l>, <&cluster_off_l>, <&mcusys_off>;
 			#cooling-cells = <2>;
 		};
@@ -82,6 +99,7 @@
 			device_type = "cpu";
 			enable-method = "psci";
 			clock-frequency = <1701000000>;
+			performance-domains = <&performance 0>;
 			cpu-idle-states = <&cpu_off_l>, <&cluster_off_l>, <&mcusys_off>;
 			#cooling-cells = <2>;
 		};
