@@ -89,30 +89,31 @@ jobs:
         if: success()
         run: |
           set -e
-          VMLINUX=$(find build_dir/target-aarch64_generic_musl/linux-mediatek_mt6990 -name vmlinux | head -n1)
-          if [ -n "$VMLINUX" ] && [ -f "$VMLINUX" ]; then
-            echo "Found vmlinux: $VMLINUX"
-            echo "Generating detached BTF using pahole..."
-            pahole -J "$VMLINUX"
-            OBJCOPY_BIN=$(which llvm-objcopy || which objcopy)
-            "$OBJCOPY_BIN" --only-section=.BTF --set-section-flags .BTF=alloc,readonly -O binary "$VMLINUX" bin/targets/mediatek/mt6990/vmlinux.btf
-            ls -lh bin/targets/mediatek/mt6990/vmlinux.btf
+          VMLINUX=$(find build_dir -name vmlinux -type f | head -n1)
+          if [ -z "$VMLINUX" ]; then
+            echo "ERROR: vmlinux not found in build_dir!"
+            exit 1
+          fi
+          echo "Found vmlinux: $VMLINUX"
+          echo "Generating detached BTF using pahole..."
+          pahole -J "$VMLINUX"
+          OBJCOPY_BIN=$(which llvm-objcopy || which objcopy)
+          "$OBJCOPY_BIN" --only-section=.BTF --set-section-flags .BTF=alloc,readonly -O binary "$VMLINUX" bin/targets/mediatek/mt6990/vmlinux.btf
+          cp -f "$VMLINUX" bin/targets/mediatek/mt6990/vmlinux
+          ls -lh bin/targets/mediatek/mt6990/vmlinux*
 
-            ROOTFS="bin/targets/mediatek/mt6990/rootfs.img"
-            if [ -f "$ROOTFS" ] && [ -f bin/targets/mediatek/mt6990/vmlinux.btf ]; then
-              echo "Injecting vmlinux.btf into rootfs.img..."
-              TMP_SQFS=$(mktemp -d)
-              unsquashfs -d "$TMP_SQFS/rootfs" "$ROOTFS"
-              mkdir -p "$TMP_SQFS/rootfs/usr/lib/debug/boot" "$TMP_SQFS/rootfs/etc/dae"
-              cp bin/targets/mediatek/mt6990/vmlinux.btf "$TMP_SQFS/rootfs/usr/lib/debug/boot/vmlinux"
-              cp bin/targets/mediatek/mt6990/vmlinux.btf "$TMP_SQFS/rootfs/etc/dae/vmlinux.btf"
-              mksquashfs "$TMP_SQFS/rootfs" "$ROOTFS" -noappend -b 256k -comp xz
-              rm -rf "$TMP_SQFS"
-              echo "Repacked rootfs.img with injected vmlinux.btf:"
-              ls -lh "$ROOTFS"
-            fi
-          else
-            echo "Warning: vmlinux not found, skipping detached BTF extraction."
+          ROOTFS="bin/targets/mediatek/mt6990/rootfs.img"
+          if [ -f "$ROOTFS" ] && [ -f bin/targets/mediatek/mt6990/vmlinux.btf ]; then
+            echo "Injecting vmlinux.btf into rootfs.img..."
+            TMP_SQFS=$(mktemp -d)
+            unsquashfs -d "$TMP_SQFS/rootfs" "$ROOTFS"
+            mkdir -p "$TMP_SQFS/rootfs/usr/lib/debug/boot" "$TMP_SQFS/rootfs/etc/dae"
+            cp bin/targets/mediatek/mt6990/vmlinux.btf "$TMP_SQFS/rootfs/usr/lib/debug/boot/vmlinux"
+            cp bin/targets/mediatek/mt6990/vmlinux.btf "$TMP_SQFS/rootfs/etc/dae/vmlinux.btf"
+            mksquashfs "$TMP_SQFS/rootfs" "$ROOTFS" -noappend -b 256k -comp xz
+            rm -rf "$TMP_SQFS"
+            echo "Repacked rootfs.img with injected vmlinux.btf:"
+            ls -lh "$ROOTFS"
           fi
 
       - name: Package sysupgrade tar bundle
