@@ -474,7 +474,12 @@ wait_modem_stack_ready() {
             pidof "$daemon" >/dev/null 2>&1 || missing="$missing $daemon"
         done
 
+        if ! netstat -tlpn 2>/dev/null | grep -q ':17171 '; then
+            missing="$missing atcid:17171"
+        fi
+
         if [ -z "$missing" ]; then
+            rm -f /tmp/modem5g-at.failed
             echo "Official modem userspace chain ready after ${waited}s"
             return 0
         fi
@@ -505,8 +510,15 @@ air6_read_sim_slot() {
 # SIM2 is the embedded SIM on AIR6. Verify the physical slot before selecting
 # the APN or starting a data call, including on recovery. No online polling.
 air6_require_sim1() {
+    rm -f /tmp/modem5g-at.failed
     local current sim_status attempt
-    current="$(air6_read_sim_slot)" || return 1
+    current="$(air6_read_sim_slot)" || {
+        sim_status="$(timeout 5 mipc_wan_cli --show_sim_status 2>/dev/null)" || sim_status=
+        case "$sim_status" in
+            MIPC_SIM_STATUS_COMPLETE_READY|MIPC_SIM_STATUS_READY) return 0 ;;
+        esac
+        return 1
+    }
     [ "$current" = 2 ] || return 0
 
     echo 'AIR6 SIM2 active; selecting physical SIM1'
@@ -519,7 +531,7 @@ air6_require_sim1() {
     for attempt in 1 2 3; do
         sim_status="$(timeout 5 mipc_wan_cli --show_sim_status 2>/dev/null)" || sim_status=
         case "$sim_status" in
-            MIPC_SIM_STATUS_COMPLETE_READY|MIPC_SIM_STATUS_SIM_PIN|MIPC_SIM_STATUS_SIM_PUK) break ;;
+            MIPC_SIM_STATUS_COMPLETE_READY|MIPC_SIM_STATUS_READY|MIPC_SIM_STATUS_SIM_PIN|MIPC_SIM_STATUS_SIM_PUK) break ;;
         esac
         [ "$attempt" -eq 3 ] || sleep 2
     done
@@ -612,7 +624,7 @@ proto_ql_datacall_setup() {
     # while mipc_wan.init attempted radio-on concurrently, creating a deadlock
     # (APN timeout vs. repeated EBUSY) on the OpenWrt procd startup sequence.
     echo "Enable modem radio before SIM/APN provisioning"
-    mipc_wan_cli --nw_radio_state_set 1
+    timeout 5 mipc_wan_cli --nw_radio_state_set 1 || true
 
     if [ "$interface" = modem5g ] && [ "$(cat /tmp/sysinfo/board_name)" = softbank,air6 ]; then
         if ! air6_require_sim1; then
@@ -645,7 +657,7 @@ proto_ql_datacall_setup() {
     cfun_retry=5
     while [ "$cfun_retry" -gt 0 ]
     do
-        cfun_state=$(mipc_wan_cli --nw_radio_state_get 0)
+        cfun_state=$(timeout 5 mipc_wan_cli --nw_radio_state_get 0 || true)
 
         if [ "$cfun_state" != "Get SW radio state:MIPC_NW_RADIO_STATE_ON" ] ; then
             echo "radio state get failed or state is off"
@@ -791,10 +803,15 @@ proto_ql_datacall_setup() {
 
     # Check ifname is up before notify OpenWRT
     # Because of PDN may be activated & deactivated soon by modem during IPv6 global address checking
-    if_check=$(ip link show $ifname up)
+    ip link set "$ifname" up 2>/dev/null || true
+    for if_i in 1 2 3; do
+        if_check=$(ip link show $ifname up 2>/dev/null)
+        [ -n "$if_check" ] && break
+        sleep 1
+    done
     if [ -z "$if_check" ] ; then
         echo "$ifname is down & re-connect"
-        echo `ip link show $ifname`
+        echo `ip link show $ifname 2>/dev/null`
         return 1
     fi
 
@@ -1061,15 +1078,15 @@ proto_ql_datacall_teardown() {
     #     ifup "$interface"
     # fi
 
+    killall -9 mipc_wan_cli 2>/dev/null || true
     proto_init_update "*" 0
     proto_send_update "$interface"
 
     # Handle AT+EFUN=0 command
-    radio_status=`(mipc_wan_cli --nw_radio_state_get)`
+    radio_status=`(timeout 3 mipc_wan_cli --nw_radio_state_get 2>/dev/null)`
     case "$radio_status" in
     *MIPC_NW_RADIO_STATE_OFF*)
         proto_notify_error "$interface" RADIO_OFF
-        proto_block_restart "$interface"
         ;;
     *)
         proto_notify_error "$interface" STOPPED

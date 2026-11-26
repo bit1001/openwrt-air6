@@ -156,6 +156,25 @@ start() {
 	mount_part /dev/block/mcf1 /mnt/vendor/mdota
 	mount_part /dev/block/mcf2 /mnt/vendor/mdota2
 
+	# Ensure ccci_fsd can find SBPID and GENERAL OTA profiles
+	mkdir -p /mnt/vendor/mdota2/custom /mnt/vendor/mdota/mdota
+	if [ -f /mnt/vendor/mdota2/mtk_default/MTK_NWOTA_SBPID_1.mcfnwota ] && [ ! -f /mnt/vendor/mdota2/custom/MTK_NWOTA_SBPID_1.mcfnwota ]; then
+		cp -f /mnt/vendor/mdota2/mtk_default/MTK_NWOTA_SBPID_1.mcfnwota /mnt/vendor/mdota2/custom/
+		chown 1504:1500 /mnt/vendor/mdota2/custom/MTK_NWOTA_SBPID_1.mcfnwota 2>/dev/null || true
+		chmod 775 /mnt/vendor/mdota2/custom/MTK_NWOTA_SBPID_1.mcfnwota
+	fi
+	if [ -f /mnt/vendor/mdota2/mtk_default/MTK_NWOTA_GENERAL.mcfnwota ] && [ ! -f /mnt/vendor/mdota/mdota/MTK_NWOTA_GENERAL.mcfnwota ]; then
+		cp -f /mnt/vendor/mdota2/mtk_default/MTK_NWOTA_GENERAL.mcfnwota /mnt/vendor/mdota/mdota/
+		chown 1504:1500 /mnt/vendor/mdota/mdota/MTK_NWOTA_GENERAL.mcfnwota 2>/dev/null || true
+		chmod 775 /mnt/vendor/mdota/mdota/MTK_NWOTA_GENERAL.mcfnwota
+	fi
+
+	# SoftBank NR11_001 causes MSONIC0 assertion on Chinese 5G NR carriers
+	if [ -f /mnt/vendor/nvdata/md/NVRAM/NVD_DATA/NR11_001 ]; then
+		log_msg "Removing conflicting NR11_001 to prevent MSONIC0 DSP assertion"
+		rm -f /mnt/vendor/nvdata/md/NVRAM/NVD_DATA/NR11_001
+	fi
+
 	# NVRAM is the hard prerequisite for MD boot.  A failure of an optional
 	# FSD partition must not suppress nvram_daemon after nvdata is available.
 	if ! grep -qs ' /mnt/vendor/nvdata ' /proc/mounts; then

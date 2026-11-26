@@ -18,12 +18,12 @@ do
         i=`expr $i + 1`                          
 done                                                            
                                                                 
-mipc_wan_cli --at_cmd at+cfun=0                                 
+timeout 5 mipc_wan_cli --at_cmd at+cfun=0 >/dev/null 2>&1 || true                                 
                                                                 
 sleep 2                                                         
                                   
-mipc_wan_cli --at_cmd at+cfun=1         
+timeout 5 mipc_wan_cli --at_cmd at+cfun=1 >/dev/null 2>&1 || true         
                                         
 ubus send modem_ee                      
                                         
-etc/init.d/mipc_submonitor.init restart
+/etc/init.d/mipc_submonitor.init restart
