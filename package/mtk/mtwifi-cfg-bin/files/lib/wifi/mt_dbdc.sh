@@ -22,16 +22,9 @@ detect_mt_dbdc() {
 	local have_mtk=0 have_mac80211=0
 
 	# Only when this program owns the radios on this board.
-	[ -x /lib/netifd/wireless/mac80211.sh ] || return 0
+	[ -x /lib/netifd/wireless/mt_dbdc.sh ] || return 0
 	[ -x /usr/sbin/mtwifi ] || return 0
 	[ -s /etc/wireless/l1profile.dat ] || return 0
-
-	# The netifd shim is installed as mac80211.sh and the radios carry
-	# "type mac80211": an existing configuration is ours, never rewrite it.
-	if grep -q 'add_driver mac80211' /lib/netifd/wireless/mac80211.sh 2>/dev/null &&
-	   uci -q show wireless | grep -q '=wifi-device$'; then
-		return 0
-	fi
 
 	for dev in $(uci -q show wireless |
 		sed -n 's/^wireless\.\([^.]*\)=wifi-device$/\1/p'); do
@@ -54,14 +47,14 @@ detect_mt_dbdc() {
 	# Both removals are permanent (overlay), which is intended on MTK boards.
 	[ -e "/etc/hotplug.d/ieee80211/10-wifi-detect" ] &&
 		rm -f /etc/hotplug.d/ieee80211/10-wifi-detect
-	# mac80211.sh is our shim; never delete it.
+	[ -e "/lib/netifd/wireless/mac80211.sh" ] &&
+		rm -f /lib/netifd/wireless/mac80211.sh
 
 	# Rebuild the whole UCI wireless config from the driver profiles (dat2uci
 	# equivalent). Write to a temporary file first so a failed detect never
 	# leaves an empty /etc/config/wireless behind.
 	rm -f /tmp/wireless.mt_dbdc
 	if /usr/sbin/mtwifi detect /tmp/wireless.mt_dbdc; then
-		sed -i "s/option type 'mt_dbdc'/option type 'mac80211'/" /tmp/wireless.mt_dbdc
 		mv -f /tmp/wireless.mt_dbdc /etc/config/wireless
 	else
 		rm -f /tmp/wireless.mt_dbdc

@@ -9,7 +9,7 @@ sync_radio_config() (
 	stage="$(mktemp -d /tmp/air6-wireless-uci.XXXXXX)"
 	trap 'rm -f "$stage/wireless"; rmdir "$stage"' EXIT
 
-	for radio in MT7992_1_1 MT7992_1_2 MT7992_1_3; do
+	for radio in MT7990_1_1 MT7990_1_2 MT7990_1_3 MT7992_1_1 MT7992_1_2 MT7992_1_3; do
 		[ "$(uci -q -t "$stage" get "wireless.$radio")" = wifi-device ] || continue
 		[ "$(uci -q -t "$stage" get "wireless.$radio.vendor")" = mediatek ] || continue
 
